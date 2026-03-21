@@ -461,7 +461,7 @@ pub async fn op_trace(
         (result, Box::new(move || fi.send_finished()))
     } else {
         let mut inspector = base_inspector;
-        inspector.set_verify_memory(true); // 开启内存验证
+        // inspector.set_verify_memory(true); // 开启内存验证
         let mut evm = Evm::new_with_inspector(
             context,
             &mut inspector,
