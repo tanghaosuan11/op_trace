@@ -9,7 +9,9 @@
   <a href="README.zh.md">中文文档</a>
 </p>
 
-![OpTrace Demo](https://github.com/user-attachments/assets/67558e35-7b50-429b-b5f1-ef09683cd5b8)
+<video src="https://github.com/user-attachments/assets/5ba07442-6fc4-4a8e-9986-8014aad02b0c" 
+       width="100%" muted autoplay loop playsinline controls muted>
+</video>
 
 > **Note:** This is a personal project with many features. Not all functionality has been fully tested — results may not always be correct.
 
