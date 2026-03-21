@@ -113,7 +113,12 @@ impl DebugSession {
         // 二分找 patch 范围: patch.frame_step in (snapshot_step, target_frame_step]
         let patches = &fm.patches;
         if patches.is_empty() {
-            return snapshot.data.clone();
+            let mut data = snapshot.data.clone();
+            let len = data.len();
+            if len % 32 != 0 {
+                data.resize((len / 32 + 1) * 32, 0);
+            }
+            return data;
         }
 
         // patch_start: 第一个 frame_step > snapshot_step
@@ -136,13 +141,17 @@ impl DebugSession {
             return snapshot.data.clone();
         }
 
-        // 计算所需最大内存大小
+        // 计算所需最大内存大小，向上取整到 32 字节（EVM 以 word 为单位扩展内存）
         let mut max_size = snapshot.data.len();
         for i in patch_start..patch_end {
             let end = patches[i].dst_offset as usize + patches[i].data.len();
             if end > max_size {
                 max_size = end;
             }
+        }
+        // 对齐到 32 字节倍数
+        if max_size % 32 != 0 {
+            max_size = (max_size / 32 + 1) * 32;
         }
 
         let mut mem = vec![0u8; max_size];

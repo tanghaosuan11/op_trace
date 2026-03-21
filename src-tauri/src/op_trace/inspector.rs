@@ -36,6 +36,8 @@ struct StepInfo {
     src_data_offset: usize,
     dst_memory_offset: usize,
     memory_size: usize,
+    /// 执行前内存大小，用于检测 MLOAD 等导致的静默内存扩张
+    memory_len_before: usize,
     stack: Vec<U256>,
     gas_remaining_before: u64,
     gas_remaining_after: u64,
@@ -92,6 +94,10 @@ struct FrameInfo {
     status: Option<InterpreterResult>,
     success: bool,
     output: Bytes,
+    /// CALL 指令的 retOffset（父 frame 内存写入起始位置）
+    ret_memory_offset: usize,
+    /// CALL 指令的 retSize（父 frame 内存最大写入长度）
+    ret_memory_size: usize,
 }
 
 
@@ -109,6 +115,8 @@ pub(crate) struct Cheatcodes<BlockT, TxT, CfgT> {
     last_journal_total_entries: usize,
     // seek_to 用的持久存储
     debug_session: Arc<Mutex<DebugSession>>,
+    /// 开关：开启后每步对比增量重建内存与实际全量内存
+    verify_memory: bool,
     phantom: core::marker::PhantomData<(BlockT, TxT, CfgT)>,
 }
 
@@ -122,12 +130,17 @@ impl<BlockT, TxT, CfgT> Cheatcodes<BlockT, TxT, CfgT> {
             encoder,
             last_journal_total_entries: 0,
             debug_session,
+            verify_memory: false,
             phantom: core::marker::PhantomData,
         }
     }
 
     pub(crate) fn flush_steps(&mut self) {
         self.encoder.flush_steps();
+    }
+
+    pub(crate) fn set_verify_memory(&mut self, enable: bool) {
+        self.verify_memory = enable;
     }
 
     pub(crate) fn send_finished(&self) {
@@ -191,6 +204,12 @@ where
     /// 以便 step_end 中读取并发送增量内存更新。
     fn record_opcode_args(&mut self, opcode: u8, stack_data: &[U256]) {
         match opcode {
+            0x51 => {
+                // MLOAD [offset]
+                self.step_info.dst_memory_offset =
+                    usize::try_from(stack_data[stack_data.len() - 1]).unwrap();
+                self.step_info.memory_size = 32;
+            }
             0x52 => {
                 // MSTORE [offset, value]
                 self.step_info.dst_memory_offset =
@@ -394,6 +413,22 @@ where
                 .unwrap_or(0) as u32;
 
         match self.step_info.opcode.as_usize() {
+            0x51 => {
+                // MLOAD - 读取不写入，但可能引起内存静默扩张（填零）
+                let offset = self.step_info.dst_memory_offset;
+                let old_size = self.step_info.memory_len_before;
+                if offset + 32 > old_size {
+                    // 内存发生了扩张，记录新增的零字节区域（revm 已保证 word 对齐）
+                    let new_size = interp.memory.len();
+                    if new_size > old_size {
+                        let expand_data = vec![0u8; new_size - old_size];
+                        self.debug_session
+                            .lock()
+                            .unwrap()
+                            .push_patch(ctx_id, frame_step, old_size as u32, expand_data);
+                    }
+                }
+            }
             0x52 | 0x53 | 0x5e => {
                 // MSTORE / MSTORE8 / MCOPY
                 let dst_offset = self.step_info.dst_memory_offset;
@@ -424,13 +459,45 @@ where
             }
             0xf3 | 0xfd => {
                 // RETURN / REVERT
+                // EVM 规范：两者都会将返回数据写入父 frame 的 retOffset 区域
                 let offset = self.step_info.dst_memory_offset;
                 let size = self.step_info.memory_size;
-                if size == 0 {
-                    return;
+                if size > 0 {
+                    let data = interp.memory.slice(offset..offset + size).to_vec();
+                    self.send_frame_result(&data);
+
+                    // 将返回值写入父 frame 内存的 [retOffset, retOffset+min(retSize, size))
+                    let frame_len = self.frame_info_vec.len();
+                    if frame_len >= 2 {
+                        let cur = &self.frame_info_vec[frame_len - 1];
+                        let ret_offset = cur.ret_memory_offset;
+                        let ret_size   = cur.ret_memory_size;
+                        if ret_size > 0 {
+                            let write_size = size.min(ret_size);
+                            let write_data = interp.memory.slice(offset..offset + write_size).to_vec();
+                            let parent = &self.frame_info_vec[frame_len - 2];
+                            let parent_ctx  = parent.frame_id;
+                            let parent_step = parent.step_count as u32;
+                            self.debug_session
+                                .lock()
+                                .unwrap()
+                                .push_patch(parent_ctx, parent_step, ret_offset as u32, write_data);
+                        }
+                    }
                 }
-                let data = interp.memory.slice(offset..offset + size).to_vec();
-                self.send_frame_result(&data);
+            }
+            0x20 | 0xf1 | 0xf2 | 0xf4 | 0xfa => {
+                // KECCAK256 / CALL / CALLCODE / DELEGATECALL / STATICCALL
+                // 这些指令的 args/ret 区域可能触发内存静默扩张（只填零）
+                let old_size = self.step_info.memory_len_before;
+                let new_size = interp.memory.len();
+                if new_size > old_size {
+                    let expand_data = vec![0u8; new_size - old_size];
+                    self.debug_session
+                        .lock()
+                        .unwrap()
+                        .push_patch(ctx_id, frame_step, old_size as u32, expand_data);
+                }
             }
             _ => {}
         }
@@ -466,6 +533,7 @@ where
         self.step_info.pc = interp.bytecode.pc();
         self.step_info.opcode = op;
         self.step_info.gas_remaining_before = interp.gas.remaining();
+        self.step_info.memory_len_before = interp.memory.len();
         let depth = context.journaled_state.depth();
 
         self.record_opcode_args(opcode, interp.stack.data());
@@ -533,6 +601,28 @@ where
             self.process_sstore_load(context, interp.stack.data());
         }
         self.dispatch_memory_update(interp);
+
+        // 内存校验：对比增量重建 vs 实际全量内存
+        if self.verify_memory {
+            let ctx_id = self.frame_current_id();
+            let frame_step = self.frame_info_vec.last().map(|f| f.step_count).unwrap_or(0) as u32;
+            let actual_size = interp.memory.len();
+            let actual_mem = interp.memory.slice(0..actual_size).to_vec();
+            let session = self.debug_session.lock().unwrap();
+            let rebuilt_mem = session.compute_memory_at_step(ctx_id, frame_step);
+            if actual_mem != rebuilt_mem {
+                eprintln!(
+                    "[MEMORY MISMATCH] ctx_id={} current_step={} pc={} opcode=0x{:02x} actual_len={} rebuilt_len={}",
+                    ctx_id, self.step_info.step_count, self.step_info.pc, self.step_info.opcode.get(), actual_mem.len(), rebuilt_mem.len()
+                );
+                // 打印前 64 字节差异
+                let cmp_len = actual_mem.len().max(rebuilt_mem.len());
+                let actual_hex: String = actual_mem.iter().take(cmp_len).map(|b| format!("{:02x}", b)).collect();
+                let rebuilt_hex: String = rebuilt_mem.iter().take(cmp_len).map(|b| format!("{:02x}", b)).collect();
+                eprintln!("  actual : {}", actual_hex);
+                eprintln!("  rebuilt: {}", rebuilt_hex);
+            }
+        }
     }
 
     fn call(
@@ -560,7 +650,10 @@ where
         };
 
         let input = inputs.input_data(context);
+        let ret_memory_offset = inputs.return_memory_offset.start;
+        let ret_memory_size = inputs.return_memory_offset.len();
         self.frame_info_vec.push(FrameInfo {
+            
             parent_id: self.frame_info_vec.last().map(|f| f.frame_id).unwrap_or(0),
             depth: context.journaled_state.depth() as u16,
             frame_id: self.frame_count as u16,
@@ -584,6 +677,8 @@ where
             input: input,
             status: None,
             output: Bytes::new(),
+            ret_memory_offset,
+            ret_memory_size,
         });
         self.send_frame_enter();
         None
@@ -607,6 +702,31 @@ where
         let success = last_frame.success;
         let gas_used = _outcome.result.gas.spent();
         let output = last_frame.output.clone();
+        // last_frame borrow ends here
+
+        // Precompile 调用不会执行 RETURN/REVERT opcode，需要在此补一个父 frame 内存 patch
+        // EVM 规范：is_ok_or_revert() 时将返回数据写入父 frame [retOffset, retOffset+min(retSize, outputLen))
+        let is_precompile = {
+            let b = _inputs.bytecode_address.as_slice();
+            b[..19].iter().all(|&x| x == 0) && b[19] > 0 && b[19] < 0x20
+        };
+        let ret_mem_start = _inputs.return_memory_offset.start;
+        let ret_mem_size  = _inputs.return_memory_offset.len();
+        if is_precompile && ret_mem_size > 0 && !output.is_empty() {
+            let write_size = output.len().min(ret_mem_size);
+            let write_data = output[..write_size].to_vec();
+            let frame_len = self.frame_info_vec.len();
+            if frame_len >= 2 {
+                let parent = &self.frame_info_vec[frame_len - 2];
+                let parent_ctx  = parent.frame_id;
+                let parent_step = parent.step_count as u32;
+                self.debug_session
+                    .lock()
+                    .unwrap()
+                    .push_patch(parent_ctx, parent_step, ret_mem_start as u32, write_data);
+            }
+        }
+
         self.flush_steps();
         self.encoder
             .send_frame_exit(frame_id, result, success, gas_used, &output);
@@ -647,6 +767,8 @@ where
             input: inputs.init_code().clone(),
             status: None,
             output: Bytes::new(),
+            ret_memory_offset: 0,
+            ret_memory_size: 0,
         });
         self.send_frame_enter();
         None
