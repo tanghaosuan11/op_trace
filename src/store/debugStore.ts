@@ -213,7 +213,7 @@ export interface TxSlice {
 }
 
 const initialTx: TxSlice = {
-  tx: "0x68d251ca722d3949d453899b5b515b61b216c1eb726526fcbb7b95e186c54248",
+  tx: "",
   txData: null,
   blockData: null,
   isFetchingTx: false,
