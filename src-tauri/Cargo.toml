@@ -35,8 +35,10 @@ rayon = "1"
 rquickjs = { version = "0.6", features = ["bindgen"] }
 
 # ── dev 模式优化：让 EVM 热路径（step / step_end）接近 release 性能 ──
+# codegen-units = 1：避免跨 codegen unit 的 .llvm.HASH 符号在增量编译时引发链接失败
 [profile.dev]
 opt-level = 2          # 自身 crate: O2 → 基本等同 release 性能，保留 debug 信息
+codegen-units = 1      # 单 CU：消除跨 CU 内部符号 hash 不匹配问题
 
 [profile.dev.package."*"]
 opt-level = 3          # 所有依赖（revm / alloy 等）: O3 → 完整优化

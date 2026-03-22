@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -24,6 +24,28 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 #[inline]
 fn u256_to_hex(v: &U256) -> String {
     bytes_to_hex(&v.to_be_bytes::<32>())
+}
+
+/// opcode 名称（大写）→ 字节值。接受 "SSTORE" 或 "0x55" 两种格式。
+fn opcode_name_to_byte(s: &str) -> Option<u8> {
+    let s = s.trim().to_uppercase();
+    if s.starts_with("0X") {
+        return u8::from_str_radix(&s[2..], 16).ok();
+    }
+    for op_num in 0u8..=255 {
+        if let Some(op) = revm::bytecode::opcode::OpCode::new(op_num) {
+            if op.as_str() == s { return Some(op_num); }
+        }
+    }
+    None
+}
+
+/// 字节值 → opcode 名称字符串（&'static str）
+#[inline]
+fn opcode_name(op: u8) -> &'static str {
+    revm::bytecode::opcode::OpCode::new(op)
+        .map(|o| o.as_str())
+        .unwrap_or("UNKNOWN")
 }
 
 /// 地址规范化：去掉 0x 前缀，转小写，20 字节
@@ -91,29 +113,271 @@ impl AnalysisFilters {
     }
 }
 
+/// 向 QuickJS 全局注册按需查询函数。
+/// 所有函数通过裸指针直接访问 DebugSession，session 生命周期长于 JS 运行时，安全。
+/// 带 Raw 后缀的是 Rust 侧实现，JS 侧包一层再暴露给脚本。
+fn register_query_fns(ctx: &Ctx<'_>, session_ptr: usize) -> rquickjs::Result<()> {
+    let g = ctx.globals();
+
+    // findStepIndicesRaw(opcode, from, to) → number[]
+    // 返回匹配 opcode 的全局步骤下标列表，from/to = -1 表示不限范围
+    {
+        let p = session_ptr;
+        g.set("findStepIndicesRaw", Function::new(ctx.clone(), move |opcode: String, from: i64, to: i64| -> Vec<u32> {
+            let sess = unsafe { &*(p as *const DebugSession) };
+            let Some(op_byte) = opcode_name_to_byte(&opcode) else { return vec![]; };
+            let from_idx = if from < 0 { 0usize } else { from as usize };
+            let to_idx   = if to < 0   { usize::MAX } else { to as usize };
+            sess.trace.iter().enumerate()
+                .filter(|(i, s)| *i >= from_idx && *i <= to_idx && s.opcode == op_byte)
+                .map(|(i, _)| i as u32)
+                .collect()
+        })?)?;
+    }
+
+    // firstStepRaw(opcode, from) → number，-1 表示未找到
+    {
+        let p = session_ptr;
+        g.set("firstStepRaw", Function::new(ctx.clone(), move |opcode: String, from: i64| -> i64 {
+            let sess = unsafe { &*(p as *const DebugSession) };
+            let Some(op_byte) = opcode_name_to_byte(&opcode) else { return -1; };
+            let from_idx = if from < 0 { 0usize } else { from as usize };
+            for (i, s) in sess.trace.iter().enumerate() {
+                if i >= from_idx && s.opcode == op_byte { return i as i64; }
+            }
+            -1
+        })?)?;
+    }
+
+    // countStepsRaw(opcode, from, to) → number
+    {
+        let p = session_ptr;
+        g.set("countStepsRaw", Function::new(ctx.clone(), move |opcode: String, from: i64, to: i64| -> u32 {
+            let sess = unsafe { &*(p as *const DebugSession) };
+            let Some(op_byte) = opcode_name_to_byte(&opcode) else { return 0; };
+            let from_idx = if from < 0 { 0usize } else { from as usize };
+            let to_idx   = if to < 0   { usize::MAX } else { to as usize };
+            sess.trace.iter().enumerate()
+                .filter(|(i, s)| *i >= from_idx && *i <= to_idx && s.opcode == op_byte)
+                .count() as u32
+        })?)?;
+    }
+
+    // totalSteps() → number
+    {
+        let p = session_ptr;
+        g.set("totalSteps", Function::new(ctx.clone(), move || -> u32 {
+            let sess = unsafe { &*(p as *const DebugSession) };
+            sess.trace.len() as u32
+        })?)?;
+    }
+
+    // getStepRaw(i) → JSON 字符串，按下标取单步数据
+    {
+        let p = session_ptr;
+        g.set("getStepRaw", Function::new(ctx.clone(), move |i: u32| -> String {
+            let sess = unsafe { &*(p as *const DebugSession) };
+            let idx = i as usize;
+            if idx >= sess.trace.len() { return "null".into(); }
+            let step = &sess.trace[idx];
+            let stack: Vec<String> = step.stack.iter().map(|v| u256_to_hex(v)).collect();
+            serde_json::json!({
+                "stepIndex": idx as u32,
+                "index":     idx as u32,
+                "contextId": step.context_id,
+                "frameStep": step.frame_step,
+                "pc":        step.pc,
+                "opcode":    opcode_name(step.opcode),
+                "opcodeNum": step.opcode,
+                "opcodeHex": format!("0x{:02x}", step.opcode),
+                "gasCost":       step.gas_cost,
+                "gasRemaining":  step.gas_remaining,
+                "contract": bytes_to_hex(step.contract_address.as_ref()),
+                "target":   bytes_to_hex(step.call_target.as_ref()),
+                "stack":    stack,
+            }).to_string()
+        })?)?;
+    }
+
+    // aggregateByOpcodeRaw(from, to) → JSON 字符串
+    // Rust 端聚合，返回 [{opcode, count, totalGas}]，按 totalGas 降序
+    {
+        let p = session_ptr;
+        g.set("aggregateByOpcodeRaw", Function::new(ctx.clone(), move |from: i64, to: i64| -> String {
+            let sess = unsafe { &*(p as *const DebugSession) };
+            let from_idx = if from < 0 { 0usize } else { from as usize };
+            let to_idx   = if to < 0   { usize::MAX } else { to as usize };
+            let mut map: HashMap<&'static str, (u64, u64)> = HashMap::new();
+            for (i, step) in sess.trace.iter().enumerate() {
+                if i < from_idx || i > to_idx { continue; }
+                let e = map.entry(opcode_name(step.opcode)).or_insert((0, 0));
+                e.0 += 1;
+                e.1 += step.gas_cost;
+            }
+            let mut entries: Vec<_> = map.into_iter()
+                .map(|(op, (count, gas))| serde_json::json!({"opcode": op, "count": count, "totalGas": gas}))
+                .collect();
+            entries.sort_by(|a, b| {
+                b["totalGas"].as_u64().unwrap_or(0).cmp(&a["totalGas"].as_u64().unwrap_or(0))
+            });
+            serde_json::Value::Array(entries).to_string()
+        })?)?;
+    }
+
+    // countByFrameRaw() → JSON 字符串
+    // 直接读 step_index map，无需扫描，返回 [{contextId, stepCount}]，按 stepCount 降序
+    {
+        let p = session_ptr;
+        g.set("countByFrameRaw", Function::new(ctx.clone(), move || -> String {
+            let sess = unsafe { &*(p as *const DebugSession) };
+            let mut entries: Vec<_> = sess.step_index.iter()
+                .map(|(&cid, indices)| serde_json::json!({"contextId": cid, "stepCount": indices.len()}))
+                .collect();
+            entries.sort_by(|a, b| {
+                b["stepCount"].as_u64().unwrap_or(0).cmp(&a["stepCount"].as_u64().unwrap_or(0))
+            });
+            serde_json::Value::Array(entries).to_string()
+        })?)?;
+    }
+
+    // getContractStatsRaw(addr) → JSON 字符串
+    // 统计指定合约的步数、gas 消耗和 opcode 分布
+    {
+        let p = session_ptr;
+        g.set("getContractStatsRaw", Function::new(ctx.clone(), move |addr: String| -> String {
+            let sess = unsafe { &*(p as *const DebugSession) };
+            let Some(target) = parse_address(&addr) else {
+                return r#"{"error":"invalid address"}"#.into();
+            };
+            let mut step_count: u64 = 0;
+            let mut total_gas:  u64 = 0;
+            let mut opcode_map: HashMap<&'static str, u64> = HashMap::new();
+            for step in &sess.trace {
+                let addr_bytes: &[u8; 20] = step.contract_address.as_ref();
+                if *addr_bytes != target { continue; }
+                step_count += 1;
+                total_gas  += step.gas_cost;
+                *opcode_map.entry(opcode_name(step.opcode)).or_insert(0) += 1;
+            }
+            serde_json::json!({
+                "stepCount": step_count,
+                "totalGas":  total_gas,
+                "opcodes":   opcode_map,
+            }).to_string()
+        })?)?;
+    }
+
+    // getSlotHistoryRaw(slot) → JSON 字符串
+    // 返回指定存储槽的所有写操作（含 oldValue/newValue），从 storage_changes 中取，不扫描 trace
+    {
+        let p = session_ptr;
+        g.set("getSlotHistoryRaw", Function::new(ctx.clone(), move |slot: String| -> String {
+            let sess = unsafe { &*(p as *const DebugSession) };
+            let raw = slot.trim().trim_start_matches("0x").trim_start_matches("0X");
+            let normalized = format!("{:0>64}", raw.to_lowercase());
+            let results: Vec<_> = sess.storage_changes.iter()
+                .filter(|c| {
+                    if c.is_read { return false; }
+                    let key_hex = &u256_to_hex(&c.key)[2..];
+                    key_hex == normalized
+                })
+                .map(|c| serde_json::json!({
+                    "stepIndex":   c.step_index as u32,
+                    "frameId":     c.frame_id,
+                    "isTransient": c.is_transient,
+                    "contract":    bytes_to_hex(c.address.as_ref()),
+                    "key":         u256_to_hex(&c.key),
+                    "oldValue":    u256_to_hex(&c.old_value),
+                    "newValue":    u256_to_hex(&c.new_value),
+                }))
+                .collect();
+            serde_json::Value::Array(results).to_string()
+        })?)?;
+    }
+
+    // getFrameInfoRaw(frameId) → JSON 字符串
+    // 按 frame id 取调用帧元数据（caller/kind/gas 等），找不到返回 "null"
+    {
+        let p = session_ptr;
+        g.set("getFrameInfoRaw", Function::new(ctx.clone(), move |frame_id: u32| -> String {
+            let sess = unsafe { &*(p as *const DebugSession) };
+            match sess.frame_map.get(&(frame_id as u16)) {
+                None => "null".into(),
+                Some(f) => serde_json::json!({
+                    "frameId":   f.frame_id,
+                    "parentId":  f.parent_id,
+                    "depth":     f.depth,
+                    "address":   bytes_to_hex(f.address.as_ref()),
+                    "caller":    bytes_to_hex(f.caller.as_ref()),
+                    "target":    bytes_to_hex(f.target_address.as_ref()),
+                    "kind":      f.kind,
+                    "gasLimit":  f.gas_limit,
+                    "gasUsed":   f.gas_used,
+                    "stepCount": f.step_count,
+                    "success":   f.success,
+                }).to_string(),
+            }
+        })?)?;
+    }
+
+    // getStorageChangesRaw(addr, from, to) → JSON 字符串
+    // addr 为空/"all" 时不过滤合约，from/to = -1 时不限范围，读写均包含
+    {
+        let p = session_ptr;
+        g.set("getStorageChangesRaw", Function::new(ctx.clone(), move |addr: String, from: i64, to: i64| -> String {
+            let sess = unsafe { &*(p as *const DebugSession) };
+            let filter_addr = if addr.trim().is_empty() || addr == "all" {
+                None
+            } else {
+                parse_address(&addr)
+            };
+            let from_idx = if from < 0 { 0usize } else { from as usize };
+            let to_idx   = if to < 0   { usize::MAX } else { to as usize };
+            let results: Vec<_> = sess.storage_changes.iter()
+                .filter(|c| {
+                    if c.step_index < from_idx || c.step_index > to_idx { return false; }
+                    if let Some(target) = filter_addr {
+                        let addr_bytes: &[u8; 20] = c.address.as_ref();
+                        if *addr_bytes != target { return false; }
+                    }
+                    true
+                })
+                .map(|c| serde_json::json!({
+                    "stepIndex":   c.step_index as u32,
+                    "frameId":     c.frame_id,
+                    "isTransient": c.is_transient,
+                    "isRead":      c.is_read,
+                    "contract":    bytes_to_hex(c.address.as_ref()),
+                    "key":         u256_to_hex(&c.key),
+                    "oldValue":    u256_to_hex(&c.old_value),
+                    "newValue":    u256_to_hex(&c.new_value),
+                }))
+                .collect();
+            serde_json::Value::Array(results).to_string()
+        })?)?;
+    }
+
+    Ok(())
+}
+
 fn inject_trace(ctx: &Ctx<'_>, session: &DebugSession, filters: &AnalysisFilters) -> rquickjs::Result<()> {
     let arr = rquickjs::Array::new(ctx.clone())?;
     let mut out_idx: u32 = 0;
 
     for (i, step) in session.trace.iter().enumerate() {
-        // step range filter
         if let Some((from, to)) = filters.step_range {
             if i < from || i > to { continue; }
         }
-        // opcode filter
         if let Some(ref f) = filters.opcodes {
             if !f.contains(&step.opcode) { continue; }
         }
-        // frame (contextId) filter
         if let Some(ref f) = filters.frames {
             if !f.contains(&step.context_id) { continue; }
         }
-        // contract (bytecode address) filter
         if let Some(ref f) = filters.contracts {
             let addr: &[u8; 20] = step.contract_address.as_ref();
             if !f.contains(addr) { continue; }
         }
-        // target (call target) filter
         if let Some(ref f) = filters.targets {
             let addr: &[u8; 20] = step.call_target.as_ref();
             if !f.contains(addr) { continue; }
@@ -166,6 +430,8 @@ pub struct RawFilters {
     pub frames:     Option<Vec<u16>>,
     /// [from, to] 两元素数组，全局步骤下标范围（含两端）
     pub step_range: Option<Vec<usize>>,
+    /// 懒加载模式：跳过 inject_trace，trace/steps 为空数组，全靠 query API 按需取数据
+    pub lazy:       Option<bool>,
 }
 
 pub fn run_analysis(
@@ -174,6 +440,7 @@ pub fn run_analysis(
     raw_filters: RawFilters,
     cancelled: Arc<AtomicBool>,
 ) -> Result<serde_json::Value, String> {
+    let lazy = raw_filters.lazy.unwrap_or(false);
     let filters = AnalysisFilters::from_raw(raw_filters);
     if cancelled.load(Ordering::Relaxed) {
         return Err("Cancelled before start".into());
@@ -183,8 +450,8 @@ pub fn run_analysis(
 
     let rt = Runtime::new().map_err(|e| format!("Runtime: {e}"))?;
 
-    rt.set_memory_limit(4 * 1024 * 1024 * 1024);   // 4 GB JS 堆
-    rt.set_max_stack_size(5 * 1024 * 1024);   // 5 MB JS 调用栈
+    rt.set_memory_limit(4 * 1024 * 1024 * 1024);   // 4 GB 堆上限
+    rt.set_max_stack_size(5 * 1024 * 1024);         // 5 MB 栈上限
 
     let deadline = Instant::now() + Duration::from_secs(30);
     let cancelled_int = Arc::clone(&cancelled);
@@ -195,9 +462,19 @@ pub fn run_analysis(
     let ctx = Context::full(&rt).map_err(|e| format!("Context: {e}"))?;
 
     ctx.with(|ctx: Ctx| -> Result<serde_json::Value, String> {
-        let t1 = std::time::Instant::now();
-        inject_trace(&ctx, session, &filters).map_err(|e| format!("inject: {e}"))?;
-        let inject_ms = t1.elapsed().as_secs_f64() * 1000.0;
+        let inject_ms;
+        if lazy {
+            // 懒加载模式：注入空数组占位，脚本通过 query API 按需取数据
+            let empty = rquickjs::Array::new(ctx.clone()).map_err(|e| format!("inject: {e}"))?;
+            let g = ctx.globals();
+            g.set("trace", empty.clone()).map_err(|e| format!("inject: {e}"))?;
+            g.set("steps", empty).map_err(|e| format!("inject: {e}"))?;
+            inject_ms = 0.0;
+        } else {
+            let t1 = std::time::Instant::now();
+            inject_trace(&ctx, session, &filters).map_err(|e| format!("inject: {e}"))?;
+            inject_ms = t1.elapsed().as_secs_f64() * 1000.0;
+        }
 
         if cancelled.load(Ordering::Relaxed) {
             return Err("Cancelled after injection".into());
@@ -224,6 +501,8 @@ pub fn run_analysis(
             )
             .map_err(|e| format!("register getMemory: {e}"))?;
 
+        register_query_fns(&ctx, session_ptr).map_err(|e| format!("query fns: {e}"))?;
+
         ctx.eval::<Value, _>(
             r#"
             function hexToNumber(hex) {
@@ -237,6 +516,49 @@ pub fn run_analysis(
                 if (!mem || mem === '0x') return '0x';
                 var h = mem.slice(2);
                 return '0x' + h.slice(offset * 2, offset * 2 + size * 2);
+            }
+            // JS 侧包装，处理 undefined/null 参数，屏蔽底层 Raw 函数
+            function findStepIndices(opcode, from, to) {
+                return findStepIndicesRaw(opcode,
+                    from !== undefined && from !== null ? from : -1,
+                    to   !== undefined && to   !== null ? to   : -1);
+            }
+            function firstStep(opcode, from) {
+                var r = firstStepRaw(opcode, from !== undefined && from !== null ? from : -1);
+                return r < 0 ? null : r;
+            }
+            function countSteps(opcode, from, to) {
+                return countStepsRaw(opcode,
+                    from !== undefined && from !== null ? from : -1,
+                    to   !== undefined && to   !== null ? to   : -1);
+            }
+            function getStep(i) {
+                var r = getStepRaw(i);
+                return (r === 'null' || !r) ? null : JSON.parse(r);
+            }
+            function aggregateByOpcode(from, to) {
+                return JSON.parse(aggregateByOpcodeRaw(
+                    from !== undefined && from !== null ? from : -1,
+                    to   !== undefined && to   !== null ? to   : -1));
+            }
+            function countByFrame() {
+                return JSON.parse(countByFrameRaw());
+            }
+            function getContractStats(addr) {
+                return JSON.parse(getContractStatsRaw(addr));
+            }
+            function getSlotHistory(slot) {
+                return JSON.parse(getSlotHistoryRaw(slot));
+            }
+            function getFrameInfo(frameId) {
+                var r = getFrameInfoRaw(frameId);
+                return (r === 'null' || !r) ? null : JSON.parse(r);
+            }
+            function getStorageChanges(addr, from, to) {
+                return JSON.parse(getStorageChangesRaw(
+                    addr || '',
+                    from !== undefined && from !== null ? from : -1,
+                    to   !== undefined && to   !== null ? to   : -1));
             }
             "#,
         )

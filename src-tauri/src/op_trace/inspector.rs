@@ -20,7 +20,7 @@ use revm_interpreter::{
 };
 use std::sync::{Arc, Mutex};
 
-use super::debug_session::{DebugSession, TraceStep};
+use super::debug_session::{DebugSession, FrameRecord, StorageChangeRecord, TraceStep};
 use super::message_encoder::MessageEncoder;
 use super::AlloyCacheDB;
 
@@ -336,6 +336,7 @@ where
         let frame_id = self.frame_current_id();
         let journal_ref = context.journal().with_journaled_state();
         let mut flat_idx = 0usize;
+        let mut new_changes: Vec<StorageChangeRecord> = Vec::new();
 
         for entry in journal_ref.journal.iter() {
             if flat_idx >= self.last_journal_total_entries {
@@ -353,8 +354,18 @@ where
                         .map(|s| s.present_value)
                         .unwrap_or_default();
                     self.send_storage_change(
-                        false, false,frame_id, step_idx, addr, *key, *had_value, new_val,
+                        false, false, frame_id, step_idx, addr, *key, *had_value, new_val,
                     );
+                    new_changes.push(StorageChangeRecord {
+                        step_index: step_idx,
+                        frame_id,
+                        is_transient: false,
+                        is_read: false,
+                        address: addr,
+                        key: *key,
+                        old_value: *had_value,
+                        new_value: new_val,
+                    });
                 }
                 if let JournalEntry::TransientStorageChange {
                     address,
@@ -371,11 +382,28 @@ where
                     self.send_storage_change(
                         true, false, frame_id, step_idx, addr, *key, *had_value, new_val,
                     );
+                    new_changes.push(StorageChangeRecord {
+                        step_index: step_idx,
+                        frame_id,
+                        is_transient: true,
+                        is_read: false,
+                        address: addr,
+                        key: *key,
+                        old_value: *had_value,
+                        new_value: new_val,
+                    });
                 }
             }
             flat_idx += 1;
         }
         self.last_journal_total_entries = flat_idx;
+
+        if !new_changes.is_empty() {
+            let mut session = self.debug_session.lock().unwrap();
+            for change in new_changes {
+                session.push_storage_change(change);
+            }
+        }
     }
 
     fn process_sstore_load(
@@ -396,6 +424,16 @@ where
             self.send_storage_change(
                 is_transient, true, frame_id, step_idx, address, storage_key, zero, *storage_data,
             );
+            self.debug_session.lock().unwrap().push_storage_change(StorageChangeRecord {
+                step_index: step_idx,
+                frame_id,
+                is_transient,
+                is_read: true,
+                address,
+                key: storage_key,
+                old_value: zero,
+                new_value: *storage_data,
+            });
         }
     }
 
@@ -680,6 +718,22 @@ where
             ret_memory_offset,
             ret_memory_size,
         });
+        // Save frame metadata to DebugSession for analysis
+        if let Some(info) = self.frame_info_vec.last() {
+            self.debug_session.lock().unwrap().push_frame_record(FrameRecord {
+                frame_id:       info.frame_id,
+                parent_id:      info.parent_id,
+                depth:          info.depth,
+                address:        info.address,
+                caller:         info.caller,
+                target_address: info.target_address,
+                kind:           format!("{:?}", info.kind),
+                gas_limit:      info.gas_limit,
+                gas_used:       0,
+                step_count:     0,
+                success:        false,
+            });
+        }
         self.send_frame_enter();
         None
     }
@@ -702,7 +756,11 @@ where
         let success = last_frame.success;
         let gas_used = _outcome.result.gas.spent();
         let output = last_frame.output.clone();
+        let frame_step_count = last_frame.step_count;
         // last_frame borrow ends here
+
+        // Finalize frame record in DebugSession
+        self.debug_session.lock().unwrap().finalize_frame(frame_id, gas_used, success, frame_step_count);
 
         // Precompile 调用不会执行 RETURN/REVERT opcode，需要在此补一个父 frame 内存 patch
         // EVM 规范：is_ok_or_revert() 时将返回数据写入父 frame [retOffset, retOffset+min(retSize, outputLen))
@@ -770,6 +828,22 @@ where
             ret_memory_offset: 0,
             ret_memory_size: 0,
         });
+        // Save frame metadata to DebugSession for analysis
+        if let Some(info) = self.frame_info_vec.last() {
+            self.debug_session.lock().unwrap().push_frame_record(FrameRecord {
+                frame_id:       info.frame_id,
+                parent_id:      info.parent_id,
+                depth:          info.depth,
+                address:        info.address,
+                caller:         info.caller,
+                target_address: info.target_address,
+                kind:           format!("{:?}", info.kind),
+                gas_limit:      info.gas_limit,
+                gas_used:       0,
+                step_count:     0,
+                success:        false,
+            });
+        }
         self.send_frame_enter();
         None
     }
@@ -792,6 +866,12 @@ where
         let success = last_frame.success;
         let gas_used = _outcome.result.gas.spent();
         let output = last_frame.output.clone();
+        let frame_step_count = last_frame.step_count;
+        // last_frame borrow ends here
+
+        // Finalize frame record in DebugSession
+        self.debug_session.lock().unwrap().finalize_frame(frame_id, gas_used, success, frame_step_count);
+
         let deployed_addr = _outcome.address.unwrap_or(Address::ZERO);
         self.send_frame_update_address(deployed_addr);
         self.flush_steps();

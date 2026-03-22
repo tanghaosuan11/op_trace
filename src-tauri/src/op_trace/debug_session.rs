@@ -2,6 +2,49 @@ use revm::primitives::{Address, U256};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+// ── Frame metadata ────────────────────────────────────────────────────────────
+
+/// Saved once per call frame; populated at call() and finalized at call_end().
+#[derive(Clone)]
+pub struct FrameRecord {
+    pub frame_id:        u16,
+    pub parent_id:       u16,
+    pub depth:           u16,
+    /// Bytecode address (contract executing the code)
+    pub address:         Address,
+    pub caller:          Address,
+    /// Call target address (may differ from address for DelegateCall)
+    pub target_address:  Address,
+    /// "Call" | "StaticCall" | "DelegateCall" | "CallCode" | "Create" | "Create2"
+    pub kind:            String,
+    pub gas_limit:       u64,
+    /// Filled at call_end
+    pub gas_used:        u64,
+    /// Total steps executed inside this frame; filled at call_end
+    pub step_count:      usize,
+    /// Whether the call succeeded; filled at call_end
+    pub success:         bool,
+}
+
+// ── Storage change record ────────────────────────────────────────────────────
+
+/// One storage read or write event, recorded during execution.
+#[derive(Clone)]
+pub struct StorageChangeRecord {
+    /// Global step index (same convention as TraceStep; 1-indexed step counter at step_end)
+    pub step_index:  usize,
+    pub frame_id:    u16,
+    pub is_transient: bool,
+    /// true = SLOAD/TLOAD read, false = SSTORE/TSTORE write
+    pub is_read:     bool,
+    pub address:     Address,
+    pub key:         U256,
+    /// For reads: old_value is zero (irrelevant). For writes: value before this write.
+    pub old_value:   U256,
+    /// For reads: the value returned. For writes: the new value written.
+    pub new_value:   U256,
+}
+
 /// 每个step的轻量存储，供 seek_to 使用
 #[derive(Clone)]
 pub struct TraceStep {
@@ -52,6 +95,10 @@ pub struct DebugSession {
     pub frame_memories: HashMap<u16, FrameMemory>,
     /// per-context 步骤索引：context_id → 全局步骤下标数组（单调递增）
     pub step_index: HashMap<u16, Vec<usize>>,
+    /// frame_id → frame metadata (populated during execution)
+    pub frame_map: HashMap<u16, FrameRecord>,
+    /// All storage read/write events in execution order
+    pub storage_changes: Vec<StorageChangeRecord>,
 }
 
 impl DebugSession {
@@ -60,7 +107,25 @@ impl DebugSession {
             trace: Vec::new(),
             frame_memories: HashMap::new(),
             step_index: HashMap::new(),
+            frame_map: HashMap::new(),
+            storage_changes: Vec::new(),
         }
+    }
+
+    pub fn push_frame_record(&mut self, record: FrameRecord) {
+        self.frame_map.insert(record.frame_id, record);
+    }
+
+    pub fn finalize_frame(&mut self, frame_id: u16, gas_used: u64, success: bool, step_count: usize) {
+        if let Some(rec) = self.frame_map.get_mut(&frame_id) {
+            rec.gas_used   = gas_used;
+            rec.success    = success;
+            rec.step_count = step_count;
+        }
+    }
+
+    pub fn push_storage_change(&mut self, change: StorageChangeRecord) {
+        self.storage_changes.push(change);
     }
 
     /// 追加一个 step 到 trace 并更新索引

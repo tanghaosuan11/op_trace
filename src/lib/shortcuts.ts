@@ -23,8 +23,8 @@ const isDebugging = () => useDebugStore.getState().stepCount > 0;
 
 export const SHORTCUT_MAP: Record<string, ShortcutDef> = {
   // 调试步进
-  "k":                { commandId: "debug.stepInto",   description: "Step Into",    when: isDebugging },
-  "j":                { commandId: "debug.stepBack",   description: "Step Back",    when: isDebugging },
+  "j":                { commandId: "debug.stepInto",   description: "Step Into",    when: isDebugging },
+  "k":                { commandId: "debug.stepBack",   description: "Step Back",    when: isDebugging },
   // "":              { commandId: "debug.stepOver",   description: "Step Over",    when: isDebugging },
   // "":        { commandId: "debug.stepOut",    description: "Step Out",     when: isDebugging },
   "space":            { commandId: "debug.continue",   description: "Continue / Pause", when: isDebugging },

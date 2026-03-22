@@ -31,6 +31,8 @@ interface ScriptFilters {
   frames?:     number[];
   /** [from, to] 全局步骤下标范围（含两端） */
   step_range?: [number, number];
+  /** 懒加载：跳过 inject_trace，trace/steps 为空，靠 query API 按需取数据 */
+  lazy?:       boolean;
 }
 
 function parseScriptFilters(script: string): ScriptFilters | null {
@@ -38,6 +40,13 @@ function parseScriptFilters(script: string): ScriptFilters | null {
   let found = false;
 
   for (const raw of script.split("\n")) {
+    // @lazy 指令（独立一行）
+    if (/^\/\/\s*@lazy\b/.test(raw.trim())) {
+      filters.lazy = true;
+      found = true;
+      continue;
+    }
+
     const m = raw.match(/^\/\/\s*@filter\s+(\w+)\s*:\s*(.+)/);
     if (!m) continue;
     found = true;
