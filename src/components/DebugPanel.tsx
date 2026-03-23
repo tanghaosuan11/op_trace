@@ -5,6 +5,7 @@ import { MemoryViewer } from "./MemoryViewer";
 import { StorageViewer } from "./StorageViewer";
 // import { CallTreeViewer } from "./CallTreeViewer"; // 已隐藏
 import { LogViewer } from "./LogViewer";
+import { SourceViewer } from "./SourceViewer";
 import { ReturnDataViewer } from "./ReturnDataViewer";
 // import { StateDiffViewer } from "./StateDiffViewer";
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@/components/ui/resizable";
@@ -264,14 +265,19 @@ export function DebugPanel({
       >
         <Tabs defaultValue="frame" className="flex flex-col min-h-0 h-full">
           <div className="flex items-center flex-shrink-0 gap-1 mb-1">
-            <TabsList className="h-7 flex-1 justify-center bg-transparent p-0">
+            <TabsList className="h-7 flex-1 justify-center bg-transparent p-0 gap-0.5">
               <TabsTrigger value="frame" className="text-xs px-2 py-0.5">Frame</TabsTrigger>
               <TabsTrigger value="events" className="text-xs px-2 py-0.5">Events</TabsTrigger>
+              <TabsTrigger value="source" className="text-xs px-2 py-0.5">Source</TabsTrigger>
             </TabsList>
           </div>
 
           <TabsContent value="events" className="flex-1 min-h-0 overflow-hidden">
             <div className="h-full overflow-hidden"><LogViewer /></div>
+          </TabsContent>
+
+          <TabsContent value="source" className="flex-1 min-h-0 overflow-hidden">
+            <div className="h-full min-h-0 overflow-hidden"><SourceViewer /></div>
           </TabsContent>
 
           <TabsContent value="frame" className="flex-1 min-h-0 overflow-hidden">

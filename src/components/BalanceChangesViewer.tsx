@@ -1,6 +1,10 @@
+import { useState } from "react";
 import { useDebugStore } from "@/store/debugStore";
 import { Card } from "@/components/ui/card";
-import { ExternalLink } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { ExternalLink, RefreshCw } from "lucide-react";
+import { createPublicClient, http } from "viem";
+import { getBackendConfig } from "@/lib/appConfig";
 
 async function openScanAddress(scanUrl: string, address: string) {
   try {
@@ -13,6 +17,10 @@ async function openScanAddress(scanUrl: string, address: string) {
   }
 }
 
+function addCommas(n: bigint): string {
+  return n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
 /** 将带符号的 wei 字符串 (+xxx / -xxx) 转为 ETH，保留 8 位小数 */
 function weiToEth(wei: string): string {
   const sign = wei.startsWith("+") ? "+" : "-";
@@ -20,7 +28,52 @@ function weiToEth(wei: string): string {
   const whole = abs / BigInt("1000000000000000000");
   const frac = abs % BigInt("1000000000000000000");
   const fracStr = frac.toString().padStart(18, "0").slice(0, 8).replace(/0+$/, "") || "0";
-  return `${sign}${whole}.${fracStr}`;
+  return `${sign}${addCommas(whole)}.${fracStr}`;
+}
+
+/** 将带符号的 raw 整数字符串按 decimals 转为人类可读数字，保留 8 位小数 */
+function applyDecimals(raw: string, decimals: number): string {
+  const sign = raw.startsWith("+") ? "+" : "-";
+  const abs = BigInt(raw.replace(/^[+-]/, ""));
+  const divisor = BigInt(10) ** BigInt(decimals);
+  const whole = abs / divisor;
+  const frac = abs % divisor;
+  const fracStr = decimals > 0
+    ? frac.toString().padStart(decimals, "0").slice(0, 8).replace(/0+$/, "") || "0"
+    : "0";
+  return `${sign}${addCommas(whole)}.${fracStr}`;
+}
+
+interface TokenInfo {
+  symbol: string;
+  decimals: number;
+}
+
+const ERC20_ABI = [
+  { name: "decimals", type: "function", inputs: [], outputs: [{ type: "uint8" }], stateMutability: "view" },
+  { name: "symbol", type: "function", inputs: [], outputs: [{ type: "string" }], stateMutability: "view" },
+] as const;
+
+async function fetchTokenInfoBatch(
+  contracts: string[],
+  rpcUrl: string,
+): Promise<Record<string, TokenInfo>> {
+  const client = createPublicClient({ transport: http(rpcUrl) });
+  const results: Record<string, TokenInfo> = {};
+  await Promise.all(
+    contracts.map(async (addr) => {
+      try {
+        const [decimals, symbol] = await Promise.all([
+          client.readContract({ address: addr as `0x${string}`, abi: ERC20_ABI, functionName: "decimals" }),
+          client.readContract({ address: addr as `0x${string}`, abi: ERC20_ABI, functionName: "symbol" }),
+        ]);
+        results[addr.toLowerCase()] = { symbol: symbol as string, decimals: Number(decimals) };
+      } catch {
+        // ignore contracts that don't implement ERC20 metadata
+      }
+    }),
+  );
+  return results;
 }
 
 function DeltaBadge({ delta }: { delta: string }) {
@@ -48,6 +101,22 @@ function AddrLink({ address, scanUrl }: { address: string; scanUrl: string }) {
 export function BalanceChangesViewer() {
   const changes = useDebugStore((s) => s.balanceChanges);
   const scanUrl = useDebugStore((s) => s.config.scanUrl);
+  const [tokenInfoMap, setTokenInfoMap] = useState<Record<string, TokenInfo>>({});
+  const [fetching, setFetching] = useState(false);
+
+  const handleFetchTokenInfo = async () => {
+    const { rpcUrl } = getBackendConfig();
+    if (!rpcUrl) return;
+    const all = [...new Set(changes.flatMap((c) => c.tokens.map((t) => t.contract)))];
+    if (all.length === 0) return;
+    setFetching(true);
+    try {
+      const info = await fetchTokenInfoBatch(all, rpcUrl);
+      setTokenInfoMap(info);
+    } finally {
+      setFetching(false);
+    }
+  };
 
   if (changes.length === 0) {
     return (
@@ -59,8 +128,21 @@ export function BalanceChangesViewer() {
 
   return (
     <Card className="h-full flex flex-col overflow-hidden">
-      <div className="text-xs font-semibold px-3 py-1.5 border-b bg-muted/50 flex-shrink-0">
-        Balance Changes ({changes.length} addresses)
+      <div className="text-xs font-semibold px-3 py-1.5 border-b bg-muted/50 flex-shrink-0 flex items-center justify-between gap-2">
+        <span>Balance Changes ({changes.length} addresses)</span>
+        <span className="text-[10px] font-normal text-muted-foreground/60 italic flex-1 text-center">
+          Duplicate token symbols are common — always verify the contract address
+        </span>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={handleFetchTokenInfo}
+          disabled={fetching}
+          className="h-6 px-2 text-[10px] gap-1"
+        >
+          <RefreshCw className={`h-3 w-3 ${fetching ? "animate-spin" : ""}`} />
+          {fetching ? "Fetching…" : "Fetch Token Info"}
+        </Button>
       </div>
       <div className="flex-1 overflow-auto scrollbar-hidden">
         <table className="w-full text-[11px]">
@@ -92,12 +174,23 @@ export function BalanceChangesViewer() {
                     <span className="text-muted-foreground">—</span>
                   ) : (
                     <div className="flex flex-col gap-1">
-                      {entry.tokens.map((t, j) => (
-                        <div key={j} className="flex items-start gap-2">
-                          <AddrLink address={t.contract} scanUrl={scanUrl} />
-                          <DeltaBadge delta={t.delta} />
-                        </div>
-                      ))}
+                      {entry.tokens.map((t, j) => {
+                        const info = tokenInfoMap[t.contract.toLowerCase()];
+                        const displayDelta = info
+                          ? applyDecimals(t.delta, info.decimals)
+                          : t.delta;
+                        return (
+                          <div key={j} className="flex items-start gap-2 flex-wrap">
+                            <AddrLink address={t.contract} scanUrl={scanUrl} />
+                            {info && (
+                              <span className="text-[10px] text-muted-foreground font-mono bg-muted/60 px-1 rounded">
+                                {info.symbol}
+                              </span>
+                            )}
+                            <DeltaBadge delta={displayDelta} />
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
                 </td>

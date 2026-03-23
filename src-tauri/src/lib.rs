@@ -1,6 +1,7 @@
 mod op_trace;
 mod optrace_journal;
 mod analysis;
+mod sourcify;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::ipc::Channel;
@@ -206,7 +207,7 @@ pub fn run() {
         .manage(AnalysisCancelFlag(Arc::new(AtomicBool::new(false))))
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet, op_trace, seek_to, scan_conditions, range_full_data, run_analysis, cancel_analysis, find_value_origin, open_app_data_dir, reset_session])
+        .invoke_handler(tauri::generate_handler![greet, op_trace, seek_to, scan_conditions, range_full_data, run_analysis, cancel_analysis, find_value_origin, open_app_data_dir, reset_session, sourcify::sourcify_read_cache, sourcify::sourcify_write_cache])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

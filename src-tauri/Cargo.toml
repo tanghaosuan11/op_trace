@@ -1,8 +1,8 @@
 [package]
 name = "optrace"
-version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+version = "0.1.5"
+description = "A Tauri-based EVM execution tracer and debugger"
+authors = ["TangHaoSuan"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -34,12 +34,12 @@ tauri-plugin-store = "2"
 rayon = "1"
 rquickjs = { version = "0.6", features = ["bindgen"] }
 
-# ── dev 模式优化：让 EVM 热路径（step / step_end）接近 release 性能 ──
-# codegen-units = 1：避免跨 codegen unit 的 .llvm.HASH 符号在增量编译时引发链接失败
+# ── dev 模式优化：让 EVM 热路径（step / step_end）有基本性能，同时保持快速增量编译 ──
+# macOS 不存在 Windows 的跨 codegen-unit .llvm.HASH 链接冲突问题，
+# 无需 codegen-units = 1，保持默认值（256）让编译器充分并行。
 [profile.dev]
-opt-level = 2          # 自身 crate: O2 → 基本等同 release 性能，保留 debug 信息
-codegen-units = 1      # 单 CU：消除跨 CU 内部符号 hash 不匹配问题
+opt-level = 1          # O1：明显快于 O2/O3，EVM 性能仍可接受，增量编译速度大幅提升
 
 [profile.dev.package."*"]
-opt-level = 3          # 所有依赖（revm / alloy 等）: O3 → 完整优化
+opt-level = 3          # 所有依赖（revm / alloy 等）: O3 → 完整优化，只首次编译一次
 
