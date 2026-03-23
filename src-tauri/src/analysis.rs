@@ -116,7 +116,12 @@ impl AnalysisFilters {
 /// 向 QuickJS 全局注册按需查询函数。
 /// 所有函数通过裸指针直接访问 DebugSession，session 生命周期长于 JS 运行时，安全。
 /// 带 Raw 后缀的是 Rust 侧实现，JS 侧包一层再暴露给脚本。
-fn register_query_fns(ctx: &Ctx<'_>, session_ptr: usize) -> rquickjs::Result<()> {
+fn register_query_fns(
+    ctx: &Ctx<'_>,
+    session_ptr: usize,
+    app_data_dir: &str,
+    chain_id: &str,
+) -> rquickjs::Result<()> {
     let g = ctx.globals();
 
     // findStepIndicesRaw(opcode, from, to) → number[]
@@ -357,6 +362,44 @@ fn register_query_fns(ctx: &Ctx<'_>, session_ptr: usize) -> rquickjs::Result<()>
         })?)?;
     }
 
+    // saveDataRaw(filename, content) → 实际写入路径，失败返回 "ERROR:..."
+    {
+        let data_dir = app_data_dir.to_owned();
+        let cid = chain_id.to_owned();
+        g.set("saveDataRaw", Function::new(ctx.clone(), move |filename: String, content: String| -> String {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
+                return "ERROR:Invalid filename".into();
+            }
+            let dir = std::path::Path::new(&data_dir).join("save_data").join(&cid);
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                return format!("ERROR:{e}");
+            }
+            let target = dir.join(&filename);
+            let final_path = if target.exists() {
+                let ts = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis();
+                let stem = std::path::Path::new(&filename)
+                    .file_stem().and_then(|s| s.to_str()).unwrap_or(&filename);
+                let ext = std::path::Path::new(&filename)
+                    .extension().and_then(|s| s.to_str());
+                let new_name = match ext {
+                    Some(e) => format!("{}_{}.{}", stem, ts, e),
+                    None    => format!("{}.{}", stem, ts),
+                };
+                dir.join(new_name)
+            } else {
+                target
+            };
+            match std::fs::write(&final_path, content.as_bytes()) {
+                Ok(_)  => final_path.to_str().unwrap_or("").to_string(),
+                Err(e) => format!("ERROR:{e}"),
+            }
+        })?)?;
+    }
+
     Ok(())
 }
 
@@ -439,6 +482,8 @@ pub fn run_analysis(
     script: &str,
     raw_filters: RawFilters,
     cancelled: Arc<AtomicBool>,
+    app_data_dir: String,
+    chain_id: String,
 ) -> Result<serde_json::Value, String> {
     let lazy = raw_filters.lazy.unwrap_or(false);
     let filters = AnalysisFilters::from_raw(raw_filters);
@@ -501,7 +546,8 @@ pub fn run_analysis(
             )
             .map_err(|e| format!("register getMemory: {e}"))?;
 
-        register_query_fns(&ctx, session_ptr).map_err(|e| format!("query fns: {e}"))?;
+        register_query_fns(&ctx, session_ptr, &app_data_dir, &chain_id)
+            .map_err(|e| format!("query fns: {e}"))?;
 
         ctx.eval::<Value, _>(
             r#"
@@ -559,6 +605,17 @@ pub fn run_analysis(
                     addr || '',
                     from !== undefined && from !== null ? from : -1,
                     to   !== undefined && to   !== null ? to   : -1));
+            }
+            // saveData(filename, content) → 写入路径字符串，失败抛出异常
+            function saveData(filename, content) {
+                var result = saveDataRaw(
+                    filename,
+                    typeof content === 'string' ? content : JSON.stringify(content, null, 2)
+                );
+                if (typeof result === 'string' && result.startsWith('ERROR:')) {
+                    throw new Error(result.slice(6));
+                }
+                return result;
             }
             "#,
         )

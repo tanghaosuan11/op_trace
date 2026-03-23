@@ -86,6 +86,8 @@ export function AnalysisDrawer() {
   const [elapsedMs, setElapsedMs] = useState<number | null>(null);
   const [dirty, setDirty] = useState(false);
 
+  const currentDebugChainId = useDebugStore((s) => s.currentDebugChainId);
+
   const [pinned, setPinned] = useState(false);
   const isGuide = scripts.find((s) => s.id === activeId)?.isGuide ?? false;
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
@@ -207,7 +209,11 @@ export function AnalysisDrawer() {
 
     try {
       const filters = parseScriptFilters(script);
-      const res = await invoke<unknown>("run_analysis", { script, filters });
+      const res = await invoke<unknown>("run_analysis", {
+        script,
+        filters,
+        chainId: currentDebugChainId?.toString(),
+      });
       const ms = performance.now() - t0;
       setElapsedMs(Math.round(ms));
       setResult(JSON.stringify(res, null, 2));
