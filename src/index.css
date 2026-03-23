@@ -104,3 +104,13 @@
     -ms-overflow-style: none;
   }
 }
+
+/* ── Sourcify PC 高亮 ─────────────────────────────────────────────────────── */
+/* Monaco decoration className 注入到 .monaco-editor 内部，需要 !important */
+.monaco-editor .sol-pc-highlight {
+  background-color: rgba(255, 200, 50, 0.22) !important;
+  border-radius: 2px;
+}
+.monaco-editor.vs-dark .sol-pc-highlight {
+  background-color: rgba(255, 200, 50, 0.18) !important;
+}
