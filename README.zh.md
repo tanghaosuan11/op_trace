@@ -9,7 +9,7 @@
   <a href="README.md">English</a>
 </p>
 
-<video src="https://github.com/user-attachments/assets/5ba07442-6fc4-4a8e-9986-8014aad02b0c" 
+<video src="https://github.com/user-attachments/assets/72ee542c-c6df-467f-acfe-c40deabaef69" 
        width="100%" muted autoplay loop playsinline controls muted>
 </video>
 
