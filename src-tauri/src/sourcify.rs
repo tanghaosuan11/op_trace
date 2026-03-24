@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use tauri::{AppHandle, Manager};
 use heimdall_decompiler::{decompile, DecompilerArgsBuilder};
 
-// ──── 全局内存缓存，避免重复反编译 ────────────────────────────────────────
 // Key: "{chain_id}:{address}", Value: 反编译结果 JSON 字符串
 lazy_static::lazy_static! {
     static ref DECOMPILE_CACHE: Mutex<HashMap<String, String>> = Mutex::new(HashMap::new());

@@ -139,7 +139,6 @@ export function SourceViewer() {
   const [loadingCache, setLoadingCache] = useState(false);
   const [fetching, setFetching] = useState(false);
   const [decompiling, setDecompiling] = useState(false);
-  const [isDecompiled, setIsDecompiled] = useState(false);
   const [activeFile, setActiveFile] = useState<string | null>(null);
   const [editorMounted, setEditorMounted] = useState(false);
 
@@ -454,11 +453,9 @@ export function SourceViewer() {
   const loadCache = useCallback(async () => {
     if (chainId == null || !codeAddress) {
       setRawJson(null);
-      setIsDecompiled(false);
       return;
     }
     setRawJson(null);
-    setIsDecompiled(false);
     setLoadingCache(true);
     try {
       // 优先加载 Sourcify 缓存
@@ -473,9 +470,6 @@ export function SourceViewer() {
           chainId,
           address: codeAddress,
         });
-        if (cached) {
-          setIsDecompiled(true);
-        }
       }
       
       setRawJson(cached ?? null);
@@ -511,7 +505,6 @@ export function SourceViewer() {
         json: body,
       });
       setRawJson(body);
-      setIsDecompiled(false);
       const src = extractSources(JSON.parse(body) as unknown);
       if (!src || Object.keys(src).length === 0) {
         toast.message("Sourcify returned no sources for this contract");
@@ -536,7 +529,6 @@ export function SourceViewer() {
         bytecode: frame.bytecode,
       });
       setRawJson(result);
-      setIsDecompiled(true);
       toast.success("Bytecode decompiled successfully");
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));
