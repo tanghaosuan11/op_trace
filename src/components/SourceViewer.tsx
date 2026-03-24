@@ -138,6 +138,8 @@ export function SourceViewer() {
   const [rawJson, setRawJson] = useState<string | null>(null);
   const [loadingCache, setLoadingCache] = useState(false);
   const [fetching, setFetching] = useState(false);
+  const [decompiling, setDecompiling] = useState(false);
+  const [isDecompiled, setIsDecompiled] = useState(false);
   const [activeFile, setActiveFile] = useState<string | null>(null);
   const [editorMounted, setEditorMounted] = useState(false);
 
@@ -452,15 +454,30 @@ export function SourceViewer() {
   const loadCache = useCallback(async () => {
     if (chainId == null || !codeAddress) {
       setRawJson(null);
+      setIsDecompiled(false);
       return;
     }
     setRawJson(null);
+    setIsDecompiled(false);
     setLoadingCache(true);
     try {
-      const cached = await invoke<string | null>("sourcify_read_cache", {
+      // 优先加载 Sourcify 缓存
+      let cached = await invoke<string | null>("sourcify_read_cache", {
         chainId,
         address: codeAddress,
       });
+      
+      // 如果没有 Sourcify 缓存，尝试加载反编译缓存
+      if (!cached) {
+        cached = await invoke<string | null>("decompile_read_cache", {
+          chainId,
+          address: codeAddress,
+        });
+        if (cached) {
+          setIsDecompiled(true);
+        }
+      }
+      
       setRawJson(cached ?? null);
     } catch (e) {
       console.error(e);
@@ -494,6 +511,7 @@ export function SourceViewer() {
         json: body,
       });
       setRawJson(body);
+      setIsDecompiled(false);
       const src = extractSources(JSON.parse(body) as unknown);
       if (!src || Object.keys(src).length === 0) {
         toast.message("Sourcify returned no sources for this contract");
@@ -504,6 +522,26 @@ export function SourceViewer() {
       toast.error(e instanceof Error ? e.message : String(e));
     } finally {
       setFetching(false);
+    }
+  };
+
+  // ── 调用后端反编译字节码 ──────────────────────────────────────────────────
+  const handleDecompile = async () => {
+    if (chainId == null || !codeAddress || !frame?.bytecode) return;
+    setDecompiling(true);
+    try {
+      const result = await invoke<string>("decompile_bytecode", {
+        chainId,
+        address: codeAddress,
+        bytecode: frame.bytecode,
+      });
+      setRawJson(result);
+      setIsDecompiled(true);
+      toast.success("Bytecode decompiled successfully");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDecompiling(false);
     }
   };
 
@@ -555,6 +593,24 @@ export function SourceViewer() {
             "Try search from Sourcify"
           )}
         </Button>
+        {frame?.bytecode && (
+          <Button
+            size="sm"
+            variant="secondary"
+            className="text-xs"
+            disabled={decompiling}
+            onClick={() => void handleDecompile()}
+          >
+            {decompiling ? (
+              <>
+                <Loader2 className="h-3 w-3 animate-spin mr-1" />
+                Decompiling bytecode…
+              </>
+            ) : (
+              "Decompile By Heimdall-rs"
+            )}
+          </Button>
+        )}
       </>
     );
   } else if (!sources || fileNames.length === 0) {

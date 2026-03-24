@@ -1,6 +1,6 @@
 [package]
 name = "optrace"
-version = "0.1.5"
+version = "0.1.6"
 description = "A Tauri-based EVM execution tracer and debugger"
 authors = ["TangHaoSuan"]
 edition = "2021"
@@ -24,6 +24,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.11", features = ["json"] }
 tokio = { version = "1", features = ["full"] }
+heimdall-decompiler = { git = "https://github.com/Jon-Becker/heimdall-rs", rev = "38071603146149cc571449cbe25570fc69e5373e" }
+lazy_static = "1.4"
 revm = { version = "36.0.0", features = ["alloydb", "std", "serde"] }
 anyhow = "1.0.100"
 alloy-provider = "1.7.3"

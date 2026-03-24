@@ -297,7 +297,7 @@ pub fn run() {
         .manage(AnalysisCancelFlag(Arc::new(AtomicBool::new(false))))
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet, op_trace, seek_to, scan_conditions, range_full_data, run_analysis, cancel_analysis, find_value_origin, open_app_data_dir, save_data, reset_session, fetch_address_labels, sourcify::sourcify_read_cache, sourcify::sourcify_write_cache])
+        .invoke_handler(tauri::generate_handler![greet, op_trace, seek_to, scan_conditions, range_full_data, run_analysis, cancel_analysis, find_value_origin, open_app_data_dir, save_data, reset_session, fetch_address_labels, sourcify::sourcify_read_cache, sourcify::sourcify_write_cache, sourcify::decompile_read_cache, sourcify::decompile_write_cache, sourcify::decompile_bytecode])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

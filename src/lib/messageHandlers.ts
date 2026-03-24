@@ -131,11 +131,17 @@ export function handleContractSource(
         _disasmCache.set(bcKey, opcodes);
     }
 
+    // 将 bytecode 转换为 hex 字符串
+    const bytecodeHex = '0x' + Array.from(bytecode)
+        .map(b => b.toString(16).padStart(2, '0'))
+        .join('');
+
     const newFrame: CallFrame = {
         id: `frame-${contextId}`,
         contextId: contextId,
         depth: depth,
         address: '',
+        bytecode: bytecodeHex,
         opcodes,
         stack: [],
         memory: "",

@@ -131,6 +131,7 @@ export interface CallFrame {
     gasUsed?: number;
     value?: string;
     input?: string;
+    bytecode?: string;
     opcodes: Opcode[];
     stack: string[];
     memory: string;
