@@ -4,7 +4,11 @@
 //! 通过 MessageEncoder 发送给前端，并写入 DebugSession 供 seek_to 查询。
 
 use crate::{
-    op_trace::frame_manager::{FrameInfo, FrameManager},
+    op_trace::{
+        frame_manager::{FrameInfo, FrameManager},
+        tracer::memory_tracer::MemoryTracer,
+        tracer::storage_tracer::StorageTracer,
+    },
     optrace_journal::OpTraceJournal,
 };
 use revm::{
@@ -44,7 +48,6 @@ struct StepInfo {
     gas_remaining_before: u64,
     gas_remaining_after: u64,
     gas_cost: u64,
-    storage_key: Option<StorageKey>,
 }
 
 pub(crate) trait CallInputExt {
@@ -81,6 +84,8 @@ pub(crate) struct Cheatcodes<BlockT, TxT, CfgT> {
     verify_memory: bool,
     phantom: core::marker::PhantomData<(BlockT, TxT, CfgT)>,
     frame_manager: FrameManager,
+    memory_tracer: MemoryTracer,
+    storage_tracer: StorageTracer,
 }
 
 impl<BlockT, TxT, CfgT> Cheatcodes<BlockT, TxT, CfgT> {
@@ -94,6 +99,8 @@ impl<BlockT, TxT, CfgT> Cheatcodes<BlockT, TxT, CfgT> {
             verify_memory: false,
             phantom: core::marker::PhantomData,
             frame_manager: FrameManager::new(debug_session),
+            memory_tracer: MemoryTracer::new(),
+            storage_tracer: StorageTracer::new(),
         }
     }
 
@@ -135,68 +142,32 @@ where
     TxT: Transaction + Clone,
     CfgT: Cfg + Clone,
 {
-    /// 根据 opcode 将内存参数（dst_offset / src_offset / size）写入 step_info，
-    /// 以便 step_end 中读取并发送增量内存更新。
-    fn record_opcode_args(&mut self, opcode: u8, stack_data: &[U256]) {
-        match opcode {
-            0x51 => {
-                // MLOAD [offset]
-                self.step_info.dst_memory_offset =
-                    usize::try_from(stack_data[stack_data.len() - 1]).unwrap();
-                self.step_info.memory_size = 32;
-            }
-            0x52 => {
-                // MSTORE [offset, value]
-                self.step_info.dst_memory_offset =
-                    usize::try_from(stack_data[stack_data.len() - 1]).unwrap();
-                self.step_info.memory_size = 32;
-            }
-            0x53 => {
-                // MSTORE8 [offset, value]
-                self.step_info.dst_memory_offset =
-                    usize::try_from(stack_data[stack_data.len() - 1]).unwrap();
-                self.step_info.memory_size = 1;
-            }
-            0x5e => {
-                // MCOPY [dst, src, size]
-                self.step_info.dst_memory_offset =
-                    usize::try_from(stack_data[stack_data.len() - 1]).unwrap();
-                self.step_info.src_data_offset =
-                    usize::try_from(stack_data[stack_data.len() - 2]).unwrap();
-                self.step_info.memory_size =
-                    usize::try_from(stack_data[stack_data.len() - 3]).unwrap();
-            }
-            0x37 | 0x39 | 0x3e => {
-                // CALLDATACOPY / CODECOPY / RETURNDATACOPY [dst, src, size]
-                self.step_info.dst_memory_offset =
-                    usize::try_from(stack_data[stack_data.len() - 1]).unwrap();
-                self.step_info.src_data_offset =
-                    usize::try_from(stack_data[stack_data.len() - 2]).unwrap();
-                self.step_info.memory_size =
-                    usize::try_from(stack_data[stack_data.len() - 3]).unwrap();
-            }
-            0x3c => {
-                // EXTCODECOPY [addr, dst, src, size]
-                self.step_info.dst_memory_offset =
-                    usize::try_from(stack_data[stack_data.len() - 2]).unwrap();
-                self.step_info.src_data_offset =
-                    usize::try_from(stack_data[stack_data.len() - 3]).unwrap();
-                self.step_info.memory_size =
-                    usize::try_from(stack_data[stack_data.len() - 4]).unwrap();
-            }
-            0xf3 | 0xfd => {
-                // RETURN / REVERT [offset, size]
-                self.step_info.dst_memory_offset =
-                    usize::try_from(stack_data[stack_data.len() - 1]).unwrap();
-                self.step_info.memory_size =
-                    usize::try_from(stack_data[stack_data.len() - 2]).unwrap();
-            }
-            0x54 | 0x5c => {
-                // SLOAD / TLOAD [key]
-                let key = StorageKey::from(stack_data[stack_data.len() - 1]);
-                self.step_info.storage_key = Some(key);
-            }
-            _ => {}
+    fn verify_memory(&self, interp: &revm::interpreter::Interpreter<EthInterpreter>) {
+        let ctx_id = self.frame_manager.current_id();
+        let frame_step = self.frame_manager.current_step_count() as u32;
+        let actual_size = interp.memory.len();
+        let actual_mem = interp.memory.slice(0..actual_size).to_vec();
+        let session = self.debug_session.lock().unwrap();
+        let rebuilt_mem = session.compute_memory_at_step(ctx_id, frame_step);
+        if actual_mem != rebuilt_mem {
+            eprintln!(
+                    "[MEMORY MISMATCH] ctx_id={} current_step={} pc={} opcode=0x{:02x} actual_len={} rebuilt_len={}",
+                    ctx_id, self.step_info.step_count, self.step_info.pc, self.step_info.opcode.get(), actual_mem.len(), rebuilt_mem.len()
+                );
+            // 打印前 64 字节差异
+            let cmp_len = actual_mem.len().max(rebuilt_mem.len());
+            let actual_hex: String = actual_mem
+                .iter()
+                .take(cmp_len)
+                .map(|b| format!("{:02x}", b))
+                .collect();
+            let rebuilt_hex: String = rebuilt_mem
+                .iter()
+                .take(cmp_len)
+                .map(|b| format!("{:02x}", b))
+                .collect();
+            eprintln!("  actual : {}", actual_hex);
+            eprintln!("  rebuilt: {}", rebuilt_hex);
         }
     }
 
@@ -298,16 +269,16 @@ where
                     self.send_storage_change(
                         false, false, frame_id, step_idx, addr, *key, *had_value, new_val,
                     );
-                    new_changes.push(StorageChangeRecord {
-                        step_index: step_idx,
+                    new_changes.push(StorageTracer::create_change_record(
+                        step_idx,
                         frame_id,
-                        is_transient: false,
-                        is_read: false,
-                        address: addr,
-                        key: *key,
-                        old_value: *had_value,
-                        new_value: new_val,
-                    });
+                        false,
+                        false,
+                        addr,
+                        *key,
+                        *had_value,
+                        new_val,
+                    ));
                 }
                 if let JournalEntry::TransientStorageChange {
                     address,
@@ -324,16 +295,16 @@ where
                     self.send_storage_change(
                         true, false, frame_id, step_idx, addr, *key, *had_value, new_val,
                     );
-                    new_changes.push(StorageChangeRecord {
-                        step_index: step_idx,
+                    new_changes.push(StorageTracer::create_change_record(
+                        step_idx,
                         frame_id,
-                        is_transient: true,
-                        is_read: false,
-                        address: addr,
-                        key: *key,
-                        old_value: *had_value,
-                        new_value: new_val,
-                    });
+                        true,
+                        false,
+                        addr,
+                        *key,
+                        *had_value,
+                        new_val,
+                    ));
                 }
             }
             flat_idx += 1;
@@ -362,7 +333,7 @@ where
             let storage_data = stack_data.last().unwrap_or(&zero);
             let address = self.frame_manager.current_target();
             let is_transient = opcode == 0x5c;
-            let storage_key = self.step_info.storage_key.unwrap_or_default();
+            let storage_key = self.storage_tracer.get_storage_key().unwrap_or_default();
             self.send_storage_change(
                 is_transient,
                 true,
@@ -376,125 +347,16 @@ where
             self.debug_session
                 .lock()
                 .unwrap()
-                .push_storage_change(StorageChangeRecord {
-                    step_index: step_idx,
+                .push_storage_change(StorageTracer::create_change_record(
+                    step_idx,
                     frame_id,
                     is_transient,
-                    is_read: true,
+                    true,
                     address,
-                    key: storage_key,
-                    old_value: zero,
-                    new_value: *storage_data,
-                });
-        }
-    }
-
-    /// 根据当前 opcode 读取 step_info 中预记录的参数，
-    /// 发送执行后的增量内存更新或 RETURN/REVERT 的返回数据。
-    fn dispatch_memory_update(
-        &mut self,
-        interp: &mut revm::interpreter::Interpreter<EthInterpreter>,
-    ) {
-        let ctx_id = self.frame_manager.current_id();
-        let frame_step = self.frame_manager.current_step_count() as u32;
-
-        match self.step_info.opcode.as_usize() {
-            0x51 => {
-                // MLOAD - 读取不写入，但可能引起内存静默扩张（填零）
-                let offset = self.step_info.dst_memory_offset;
-                let old_size = self.step_info.memory_len_before;
-                if offset + 32 > old_size {
-                    // 内存发生了扩张，记录新增的零字节区域（revm 已保证 word 对齐）
-                    let new_size = interp.memory.len();
-                    if new_size > old_size {
-                        let expand_data = vec![0u8; new_size - old_size];
-                        self.debug_session.lock().unwrap().push_patch(
-                            ctx_id,
-                            frame_step,
-                            old_size as u32,
-                            expand_data,
-                        );
-                    }
-                }
-            }
-            0x52 | 0x53 | 0x5e => {
-                // MSTORE / MSTORE8 / MCOPY
-                let dst_offset = self.step_info.dst_memory_offset;
-                let size = self.step_info.memory_size;
-                if size == 0 {
-                    return;
-                }
-                let data = interp.memory.slice(dst_offset..dst_offset + size).to_vec();
-                // 存储 patch 到 DebugSession（供 seek_to 重建内存），不再发前端
-                self.debug_session.lock().unwrap().push_patch(
-                    ctx_id,
-                    frame_step,
-                    dst_offset as u32,
-                    data,
-                );
-            }
-            0x37 | 0x39 | 0x3c | 0x3e => {
-                // CALLDATACOPY / CODECOPY / EXTCODECOPY / RETURNDATACOPY
-                let dst_offset = self.step_info.dst_memory_offset;
-                let size = self.step_info.memory_size;
-                if size == 0 {
-                    return;
-                }
-                let data = interp.memory.slice(dst_offset..dst_offset + size).to_vec();
-                // 存储 patch 到 DebugSession（供 seek_to 重建内存），不再发前端
-                self.debug_session.lock().unwrap().push_patch(
-                    ctx_id,
-                    frame_step,
-                    dst_offset as u32,
-                    data,
-                );
-            }
-            0xf3 | 0xfd => {
-                // RETURN / REVERT
-                // EVM 规范：两者都会将返回数据写入父 frame 的 retOffset 区域
-                let offset = self.step_info.dst_memory_offset;
-                let size = self.step_info.memory_size;
-                if size > 0 {
-                    let data = interp.memory.slice(offset..offset + size).to_vec();
-                    self.send_frame_result(&data);
-
-                    // 将返回值写入父 frame 内存的 [retOffset, retOffset+min(retSize, size))
-                    let frame_len = self.frame_manager.frame_stack_len();
-                    if frame_len >= 2 {
-                        let ret_offset = self.frame_manager.current_ret_memory_offset();
-                        let ret_size = self.frame_manager.current_ret_memory_size();
-                        if ret_size > 0 {
-                            let write_size = size.min(ret_size);
-                            let write_data =
-                                interp.memory.slice(offset..offset + write_size).to_vec();
-                            let parent_ctx = self.frame_manager.parent_id();
-                            let parent_step = self.frame_manager.parent_step_count() as u32;
-                            self.debug_session.lock().unwrap().push_patch(
-                                parent_ctx,
-                                parent_step,
-                                ret_offset as u32,
-                                write_data,
-                            );
-                        }
-                    }
-                }
-            }
-            0x20 | 0xf1 | 0xf2 | 0xf4 | 0xfa => {
-                // KECCAK256 / CALL / CALLCODE / DELEGATECALL / STATICCALL
-                // 这些指令的 args/ret 区域可能触发内存静默扩张（只填零）
-                let old_size = self.step_info.memory_len_before;
-                let new_size = interp.memory.len();
-                if new_size > old_size {
-                    let expand_data = vec![0u8; new_size - old_size];
-                    self.debug_session.lock().unwrap().push_patch(
-                        ctx_id,
-                        frame_step,
-                        old_size as u32,
-                        expand_data,
-                    );
-                }
-            }
-            _ => {}
+                    storage_key,
+                    zero,
+                    *storage_data,
+                ));
         }
     }
 
@@ -530,7 +392,11 @@ where
         self.step_info.memory_len_before = interp.memory.len();
         let depth = context.journaled_state.depth();
 
-        self.record_opcode_args(opcode, interp.stack.data());
+        self.memory_tracer
+            .record_opcode_args(op, interp.stack.data());
+
+        self.storage_tracer
+            .record_storage_key(op, interp.stack.data());
 
         let frame_step_count = self.frame_manager.current_step_count();
         self.encoder.pack_step(
@@ -594,36 +460,40 @@ where
         if op == 0x54 || op == 0x5c {
             self.process_sstore_load(context, interp.stack.data());
         }
-        self.dispatch_memory_update(interp);
+
+        // 增量内存变更处理
+        if let Some(ret_info) = self.memory_tracer.dispatch_update(
+            self.step_info.opcode,
+            interp,
+            self.frame_manager.current_id(),
+            self.frame_manager.current_step_count(),
+            &self.debug_session,
+            &self.encoder,
+            self.step_info.memory_len_before,
+        ) {
+            // 处理 RETURN/REVERT 写入父帧的逻辑
+            let frame_len = self.frame_manager.frame_stack_len();
+            if frame_len >= 2 {
+                let ret_offset = self.frame_manager.current_ret_memory_offset();
+                let ret_size = self.frame_manager.current_ret_memory_size();
+                if ret_size > 0 {
+                    let write_size = ret_info.data.len().min(ret_size);
+                    let write_data = ret_info.data[..write_size].to_vec();
+                    let parent_ctx = self.frame_manager.parent_id();
+                    let parent_step = self.frame_manager.parent_step_count() as u32;
+                    self.debug_session.lock().unwrap().push_patch(
+                        parent_ctx,
+                        parent_step,
+                        ret_offset as u32,
+                        write_data,
+                    );
+                }
+            }
+        }
 
         // 内存校验：对比增量重建 vs 实际全量内存
         if self.verify_memory {
-            let ctx_id = self.frame_manager.current_id();
-            let frame_step = self.frame_manager.current_step_count() as u32;
-            let actual_size = interp.memory.len();
-            let actual_mem = interp.memory.slice(0..actual_size).to_vec();
-            let session = self.debug_session.lock().unwrap();
-            let rebuilt_mem = session.compute_memory_at_step(ctx_id, frame_step);
-            if actual_mem != rebuilt_mem {
-                eprintln!(
-                    "[MEMORY MISMATCH] ctx_id={} current_step={} pc={} opcode=0x{:02x} actual_len={} rebuilt_len={}",
-                    ctx_id, self.step_info.step_count, self.step_info.pc, self.step_info.opcode.get(), actual_mem.len(), rebuilt_mem.len()
-                );
-                // 打印前 64 字节差异
-                let cmp_len = actual_mem.len().max(rebuilt_mem.len());
-                let actual_hex: String = actual_mem
-                    .iter()
-                    .take(cmp_len)
-                    .map(|b| format!("{:02x}", b))
-                    .collect();
-                let rebuilt_hex: String = rebuilt_mem
-                    .iter()
-                    .take(cmp_len)
-                    .map(|b| format!("{:02x}", b))
-                    .collect();
-                eprintln!("  actual : {}", actual_hex);
-                eprintln!("  rebuilt: {}", rebuilt_hex);
-            }
+            self.verify_memory(interp);
         }
     }
 
@@ -714,8 +584,10 @@ where
         //     .as_ref()
         //     .is_some_and(|status| status.is_ok());
         // last_frame.output = _outcome.result.output.clone();
-        self.frame_manager.current_update_outcome(_outcome.result.output.clone(), _outcome.result.gas.spent());
-        self.frame_manager.current_update_status(_outcome.result.clone());
+        self.frame_manager
+            .current_update_outcome(_outcome.result.output.clone(), _outcome.result.gas.spent());
+        self.frame_manager
+            .current_update_status(_outcome.result.clone());
         let frame_id = self.frame_manager.current_id();
         let result = _outcome.result.result;
         let success = self.frame_manager.current_is_success();
@@ -833,8 +705,10 @@ where
         //     .status
         //     .as_ref()
         //     .is_some_and(|status| status.is_ok());
-        self.frame_manager.current_update_outcome(_outcome.result.output.clone(), _outcome.result.gas.spent());
-        self.frame_manager.current_update_status(_outcome.result.clone());
+        self.frame_manager
+            .current_update_outcome(_outcome.result.output.clone(), _outcome.result.gas.spent());
+        self.frame_manager
+            .current_update_status(_outcome.result.clone());
         let frame_id = self.frame_manager.current_id();
         let result = _outcome.result.result;
         let success = self.frame_manager.current_is_success();

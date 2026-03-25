@@ -12,6 +12,7 @@ mod scan;
 pub mod debug_session;
 mod types;
 mod frame_manager;
+mod tracer;
 pub mod fork;
 
 pub use debug_session::DebugSessionState;
