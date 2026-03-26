@@ -6,11 +6,11 @@
 use crate::{
     op_trace::{
         frame_manager::{FrameInfo, FrameManager},
-        tracer::bytecode_tracer::BytecodeTracer,
-        tracer::gas_tracer::GasTracer,
-        tracer::log_tracer::LogTracer,
         tracer::memory_tracer::MemoryTracer,
         tracer::storage_tracer::StorageTracer,
+        tracer::gas_tracer::GasTracer,
+        tracer::log_tracer::LogTracer,
+        // tracer::bytecode_tracer::BytecodeTracer,
     },
     optrace_journal::OpTraceJournal,
 };
@@ -25,7 +25,7 @@ use revm::{
 };
 use revm_interpreter::{
     interpreter_types::{Jumps, MemoryTr},
-    CallInput, CallScheme, CreateInputs, CreateOutcome, CreateScheme,
+    CallInput, CallScheme, CreateInputs, CreateOutcome, CreateScheme, 
 };
 use std::sync::{Arc, Mutex};
 
@@ -119,6 +119,7 @@ impl<BlockT, TxT, CfgT> Cheatcodes<BlockT, TxT, CfgT> {
     pub(crate) fn send_balance_changes(&self, json: &str) {
         self.encoder.send_balance_changes(json);
     }
+
 }
 
 impl<BlockT, TxT, CfgT> Cheatcodes<BlockT, TxT, CfgT>
@@ -227,7 +228,14 @@ where
                         false, false, frame_id, step_idx, addr, *key, *had_value, new_val,
                     );
                     new_changes.push(StorageTracer::create_change_record(
-                        step_idx, frame_id, false, false, addr, *key, *had_value, new_val,
+                        step_idx,
+                        frame_id,
+                        false,
+                        false,
+                        addr,
+                        *key,
+                        *had_value,
+                        new_val,
                     ));
                 }
                 if let JournalEntry::TransientStorageChange {
@@ -246,7 +254,14 @@ where
                         true, false, frame_id, step_idx, addr, *key, *had_value, new_val,
                     );
                     new_changes.push(StorageTracer::create_change_record(
-                        step_idx, frame_id, true, false, addr, *key, *had_value, new_val,
+                        step_idx,
+                        frame_id,
+                        true,
+                        false,
+                        addr,
+                        *key,
+                        *had_value,
+                        new_val,
                     ));
                 }
             }
@@ -287,8 +302,10 @@ where
                 zero,
                 *storage_data,
             );
-            self.debug_session.lock().unwrap().push_storage_change(
-                StorageTracer::create_change_record(
+            self.debug_session
+                .lock()
+                .unwrap()
+                .push_storage_change(StorageTracer::create_change_record(
                     step_idx,
                     frame_id,
                     is_transient,
@@ -297,8 +314,7 @@ where
                     storage_key,
                     zero,
                     *storage_data,
-                ),
-            );
+                ));
         }
     }
 
@@ -381,8 +397,7 @@ where
         self.frame_manager.current_increment_step_count();
         // flush 移到 step_end，确保 gas_cost 回填后再发送
         // 记录当前 step 计数供 LogTracer 使用
-        self.log_tracer
-            .record_current_step_count(self.step_info.step_count);
+        self.log_tracer.record_current_step_count(self.step_info.step_count);
 
         self.step_info.step_count += 1;
     }
@@ -402,8 +417,7 @@ where
             }
         }
         // 发送此步的 gas_cost 给前端
-        self.encoder
-            .backfill_gas_cost(self.gas_tracer.get_gas_cost());
+        self.encoder.backfill_gas_cost(self.gas_tracer.get_gas_cost());
 
         self.process_journal_storage(context);
         // 只在 SLOAD/TLOAD 时才需要读栈顶，避免每步都做 Vec 堆分配
@@ -492,7 +506,9 @@ where
                 CallScheme::StaticCall => CallKind::StaticCall,
                 CallScheme::CallCode => CallKind::CallCode,
                 CallScheme::DelegateCall => CallKind::DelegateCall,
-                _ => CallKind::Call,
+                _ => {
+                    CallKind::Call
+                },
             },
             gas_used: 0,
             gas_limit: inputs.gas_limit,
