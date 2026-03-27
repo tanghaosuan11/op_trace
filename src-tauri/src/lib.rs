@@ -22,12 +22,13 @@ async fn op_trace(
     rpc_url: String,
     use_alloy_cache: bool,
     use_prestate: bool,
+    enable_shadow: bool,
     patches: Option<Vec<op_trace::fork::StatePatch>>,
     channel: Channel,
     state: tauri::State<'_, op_trace::DebugSessionState>,
 ) -> Result<(), String> {
     let session_arc = Arc::clone(&state.0);
-    op_trace::op_trace(tx, tx_data, block_data, &rpc_url, use_alloy_cache, use_prestate, patches.unwrap_or_default(), channel, app_handle, session_arc)
+    op_trace::op_trace(tx, tx_data, block_data, &rpc_url, use_alloy_cache, use_prestate, enable_shadow, patches.unwrap_or_default(), channel, app_handle, session_arc)
         .await
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -203,6 +204,91 @@ async fn reset_session(
     Ok(())
 }
 
+
+/// 返回数据流树形结构，用于前端显示
+#[tauri::command]
+async fn backward_slice_tree(
+    global_step: u32,
+    stack_depth: Option<u32>,
+    value_hint: Option<String>,
+    phase: Option<String>,
+    frame_id: Option<String>,
+    state: tauri::State<'_, op_trace::DebugSessionState>,
+) -> Result<op_trace::shadow::DataFlowTree, String> {
+    eprintln!("[backward_slice_tree] ========== 数据流查询开始 ==========");
+    eprintln!("[backward_slice_tree] 全局步骤: {}", global_step);
+    eprintln!("[backward_slice_tree] ❗ 栈深度(原始): {:?}", stack_depth);
+    eprintln!("[backward_slice_tree] 数值: {:?}", value_hint);
+    eprintln!("[backward_slice_tree] phase: {:?}", phase);
+    eprintln!("[backward_slice_tree] frame_id(raw): {:?}", frame_id);
+    
+    let guard = state.0.lock().map_err(|e| e.to_string())?;
+    let session = guard.as_ref().ok_or("No debug session active")?;
+    let shadow = session.shadow.as_ref().ok_or("Shadow state not available")?;
+    
+    eprintln!("[backward_slice_tree] shadow 节点总数: {}", shadow.node_count());
+    eprintln!(
+        "[backward_slice_tree] 📍 即将调用backward_slice_tree: global_step={}, stack_depth={:?}, phase={:?}, frame_id={:?}",
+        global_step, stack_depth, phase, frame_id
+    );
+    
+    let value_hint_str = value_hint.as_deref();
+    let phase_str = phase.as_deref();
+    let frame_id_num = frame_id.as_deref().and_then(|raw| {
+        let s = raw.trim();
+        let digits = s.strip_prefix("frame-").unwrap_or(s);
+        digits.parse::<u16>().ok()
+    });
+    let result = shadow.backward_slice_tree(global_step, stack_depth, value_hint_str, phase_str, frame_id_num)?;
+    
+    eprintln!("[backward_slice_tree] ✓ 查询完成: {} 个节点", result.nodes.len());
+    eprintln!("[backward_slice_tree] ========== 数据流查询结束 ==========");
+    
+    Ok(result)
+}
+
+/// 打印指定范围步骤的详细调试信息
+#[tauri::command]
+async fn debug_shadow_steps(
+    start: u32,
+    end: u32,
+    state: tauri::State<'_, op_trace::DebugSessionState>,
+) -> Result<String, String> {
+    let guard = state.0.lock().map_err(|e| e.to_string())?;
+    let session = guard.as_ref().ok_or("No debug session active")?;
+    let shadow = session.shadow.as_ref().ok_or("Shadow state not available")?;
+    
+    shadow.debug_steps(start as usize, end as usize);
+    Ok(format!("已打印步骤 {} 到 {} 的调试信息到控制台", start, end))
+}
+
+/// 导出所有步骤的影子信息到tmp文件
+#[tauri::command]
+async fn export_all_shadow_steps(
+    state: tauri::State<'_, op_trace::DebugSessionState>,
+) -> Result<String, String> {
+    let guard = state.0.lock().map_err(|e| e.to_string())?;
+    let session = guard.as_ref().ok_or("No debug session active")?;
+    let shadow = session.shadow.as_ref().ok_or("Shadow state not available")?;
+    
+    let file_path = shadow.export_all_steps_to_file()
+        .map_err(|e| format!("Failed to export shadow steps: {}", e))?;
+    
+    Ok(file_path)
+}
+
+#[tauri::command]
+async fn validate_shadow_steps(
+    max_mismatches: Option<usize>,
+    state: tauri::State<'_, op_trace::DebugSessionState>,
+) -> Result<op_trace::shadow::ShadowValidationReport, String> {
+    let guard = state.0.lock().map_err(|e| e.to_string())?;
+    let session = guard.as_ref().ok_or("No debug session active")?;
+    let shadow = session.shadow.as_ref().ok_or("Shadow state not available")?;
+    Ok(shadow.validate_step_consistency(max_mismatches.unwrap_or(200)))
+}
+
+
 /// 代理请求 eth-labels.com API，绕过浏览器 CORS 限制
 #[tauri::command]
 async fn fetch_address_labels(address: String) -> Result<Vec<serde_json::Value>, String> {
@@ -297,7 +383,7 @@ pub fn run() {
         .manage(AnalysisCancelFlag(Arc::new(AtomicBool::new(false))))
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet, op_trace, seek_to, scan_conditions, range_full_data, run_analysis, cancel_analysis, find_value_origin, open_app_data_dir, save_data, reset_session, fetch_address_labels, sourcify::sourcify_read_cache, sourcify::sourcify_write_cache, sourcify::decompile_read_cache, sourcify::decompile_write_cache, sourcify::decompile_bytecode])
+        .invoke_handler(tauri::generate_handler![greet, op_trace, seek_to, scan_conditions, range_full_data, run_analysis, cancel_analysis, find_value_origin, open_app_data_dir, save_data, reset_session, fetch_address_labels, backward_slice_tree, debug_shadow_steps, export_all_shadow_steps, validate_shadow_steps, sourcify::sourcify_read_cache, sourcify::sourcify_write_cache, sourcify::decompile_read_cache, sourcify::decompile_write_cache, sourcify::decompile_bytecode])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

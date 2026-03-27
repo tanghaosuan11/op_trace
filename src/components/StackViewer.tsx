@@ -25,6 +25,8 @@ const ROW_HEIGHT = 20;
 export function StackViewer({ stackLabels = [], stackMemoryAccess = [], onMemoryHighlight, onSeekTo }: StackViewerProps) {
   const stack = useDebugStore((s) => s.stack);
   const currentStepIndex = useDebugStore((s) => s.currentStepIndex);
+  const activeTab = useDebugStore((s) => s.activeTab);
+  const openDataFlowModal = useDebugStore((s) => s.openDataFlowModal);
   const parentRef = useRef<HTMLDivElement>(null);
 
   // 逆序栈：后进先出，最新的元素在最上面
@@ -153,6 +155,46 @@ export function StackViewer({ stackLabels = [], stackMemoryAccess = [], onMemory
                         }}
                       >
                         Find Last Show
+                      </PanelContextMenuItem>
+                      <PanelContextMenuItem
+                        onSelect={async () => {
+                          try {
+                            // originalIndex 是栈底到当前位置的索引
+                            const stackDepth = stack.length - 1 - originalIndex;  // 转换为栈深度（0=栈顶）
+                            console.log(`[StackViewer] Data Flow Tree: step=${currentStepIndex}, stack_depth=${stackDepth}, value=${reversedStack[virtualRow.index]}`);
+                            const tree = await invoke<{
+                              root_id: number;
+                              nodes: Array<{
+                                id: number;
+                                global_step: number;
+                                pc: number;
+                                opcode: number;
+                                opcode_name: string;
+                                parent_ids: number[];
+                                stack_value_post?: string;
+                              }>;
+                            }>("backward_slice_tree", {
+                              globalStep: currentStepIndex,
+                              stackDepth: stackDepth,
+                              valueHint: reversedStack[virtualRow.index],
+                              phase: "pre",
+                              frameId: activeTab,
+                            });
+                            console.log("[StackViewer] backward_slice_tree returned:", tree);
+                            openDataFlowModal(tree.root_id, tree.nodes);
+                            toast.success(`追踪栈深度 ${stackDepth} 的数据: ${tree.nodes.length} 个节点`);
+                          } catch (e) {
+                            console.error("[StackViewer] backward_slice_tree error:", e);
+                            const msg = String(e);
+                            if (msg.includes("Value hint mismatch")) {
+                              toast.warning(msg);
+                            } else {
+                              toast.error(`Data flow tree failed: ${e}`);
+                            }
+                          }
+                        }}
+                      >
+                        Data Flow Tree
                       </PanelContextMenuItem>
                       {/* Notes: hidden until feature is complete
                       <PanelContextMenuSeparator />

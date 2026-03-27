@@ -38,12 +38,9 @@ tauri-plugin-store = "2"
 rayon = "1"
 rquickjs = { version = "0.6", features = ["bindgen"] }
 
-# ── dev 模式优化：让 EVM 热路径（step / step_end）有基本性能，同时保持快速增量编译 ──
-# macOS 不存在 Windows 的跨 codegen-unit .llvm.HASH 链接冲突问题，
-# 无需 codegen-units = 1，保持默认值（256）让编译器充分并行。
+
 [profile.dev]
-opt-level = 1          # O1：明显快于 O2/O3，EVM 性能仍可接受，增量编译速度大幅提升
-
+codegen-units = 1   
+opt-level = 1          
 [profile.dev.package."*"]
-opt-level = 3          # 所有依赖（revm / alloy 等）: O3 → 完整优化，只首次编译一次
-
+opt-level = 3         

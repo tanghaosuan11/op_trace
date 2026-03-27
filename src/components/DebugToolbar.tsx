@@ -7,6 +7,7 @@ import { CallTreeViewer } from "@/components/CallTreeViewer";
 import { useDebugStore } from "@/store/debugStore";
 import { useForkStore } from "@/store/forkStore";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { toast } from "sonner";
 import {
   PauseConditionType,
@@ -14,6 +15,7 @@ import {
   PAUSE_CONDITION_LABELS,
 } from "@/lib/pauseConditions";
 import { findCallPatterns, MatchResult } from "@/lib/patternMatcher";
+import { ShadowDiagnosticsDialog } from "@/components/ShadowDiagnosticsDialog";
 import {
   Select,
   SelectContent,
@@ -31,6 +33,7 @@ import {
   SlidersHorizontal,
   ChevronLeft,
   ChevronRight,
+  Bug,
 } from "lucide-react";
 
 interface DebugToolbarProps {
@@ -99,6 +102,8 @@ export function DebugToolbar({
   const [patchStackVal, setPatchStackVal] = useState("");
   const [patchMemOffset, setPatchMemOffset] = useState("");
   const [patchMemVal, setPatchMemVal] = useState("");
+  const [diagnosticsDialogOpen, setDiagnosticsDialogOpen] = useState(false);
+  const hasSession = stepCount > 0;
 
 
   return (
@@ -256,6 +261,24 @@ export function DebugToolbar({
       )}
 
       <div className="w-px h-6 bg-border mx-1" />
+
+      {isDebug && hasSession && (
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button 
+                onClick={() => setDiagnosticsDialogOpen(true)} 
+                variant="outline" 
+                size="sm" 
+                className="h-6 px-2.5"
+              >
+                <Bug className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Shadow Stack Diagnostics</TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      )}
 
       <Button
         variant={isCallTreeOpen ? "secondary" : "ghost"}
@@ -682,6 +705,8 @@ export function DebugToolbar({
         </div>
       </SheetContent>
     </Sheet>
+
+    <ShadowDiagnosticsDialog open={diagnosticsDialogOpen} onOpenChange={setDiagnosticsDialogOpen} />
     </>
   );
 }

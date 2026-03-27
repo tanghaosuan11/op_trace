@@ -5,6 +5,7 @@ import { fetchTxInfo } from "./txFetcher";
 import {
   handleMessage,
   resetPendingFrameEnters,
+  markDebugPerfStart,
 } from "./messageHandlers";
 import type { CallFrame, CallTreeNode, MessageHandlerContext } from "./types";
 import { type StepData } from "./stepPlayer";
@@ -68,6 +69,7 @@ export async function startDebugAction(deps: StartDebugDeps) {
   }
 
   console.log("开始调试，txHash:", txHash);
+  markDebugPerfStart();
 
   // 保存当前调试的 chainId 到全局 store
   sync({ currentDebugChainId: getSelectedChain() });
@@ -90,6 +92,7 @@ export async function startDebugAction(deps: StartDebugDeps) {
   console.log("准备调试数据:", { txHash, txData, blockData });
 
   try {
+    const invokeStart = performance.now();
     const channel = new Channel();
 
     channel.onmessage = (message: unknown) => {
@@ -131,6 +134,7 @@ export async function startDebugAction(deps: StartDebugDeps) {
         : null,
       channel,
     });
+    console.log(`[perf.frontend] invoke(op_trace) resolved in ${(performance.now() - invokeStart).toFixed(1)}ms`);
     // 流式接收结束，用精确的最终步数触发一次全量缓存（防止最后一批步数不在 500 边界上）
     const finalCount = deps.allStepsRef.current.length;
     if (finalCount > 0) deps.setStepCount(finalCount);

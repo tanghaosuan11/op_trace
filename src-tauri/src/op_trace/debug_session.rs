@@ -99,6 +99,8 @@ pub struct DebugSession {
     pub frame_map: HashMap<u16, FrameRecord>,
     /// All storage read/write events in execution order
     pub storage_changes: Vec<StorageChangeRecord>,
+    /// 数据流追踪（Shadow Stack / Memory / Storage）
+    pub shadow: Option<super::shadow::ShadowState>,
 }
 
 impl DebugSession {
@@ -109,6 +111,7 @@ impl DebugSession {
             step_index: HashMap::new(),
             frame_map: HashMap::new(),
             storage_changes: Vec::new(),
+            shadow: None,
         }
     }
 

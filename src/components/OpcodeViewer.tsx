@@ -10,6 +10,8 @@ import { useDebugStore } from "@/store/debugStore";
 import {
   PanelContextMenu,
   PanelContextMenuTrigger,
+  PanelContextMenuContent,
+  PanelContextMenuItem,
 } from "@/components/ui/panel-context-menu";
 // import { addStepMarkFromOpcode } from "@/components/NotesDrawer";
 
@@ -56,6 +58,7 @@ export function OpcodeViewer({ onStackFieldsToggle, onToggleBreakpoint }: Opcode
   const stack = useDebugStore((s) => s.stack);
   const breakpointPcs = useDebugStore((s) => s.breakpointPcs);
   const breakpointLabels = useDebugStore((s) => s.breakpointLabels);
+  const backwardSliceHighlight = useDebugStore((s) => s.backwardSliceHighlight);
   const [searchPc, setSearchPc] = useState("");
   const [highlightedIndex, setHighlightedIndex] = useState<number | null>(null);
   const [hoveredData, setHoveredData] = useState<{ data: string; x: number; y: number } | null>(null);
@@ -441,6 +444,7 @@ export function OpcodeViewer({ onStackFieldsToggle, onToggleBreakpoint }: Opcode
                 const opcode = filteredOpcodes[virtualRow.index];
                 const isCurrentPc = opcode.pc === currentPc;
                 const isHighlighted = virtualRow.index === highlightedIndex;
+                const isBackwardSliceHit = backwardSliceHighlight.has(opcode.pc);
 
                 return (
                   <PanelContextMenu key={virtualRow.key}>
@@ -459,6 +463,8 @@ export function OpcodeViewer({ onStackFieldsToggle, onToggleBreakpoint }: Opcode
                         ? "bg-blue-200 dark:bg-blue-900"
                         : isHighlighted
                         ? "bg-yellow-200 dark:bg-yellow-800"
+                        : isBackwardSliceHit
+                        ? "bg-purple-200 dark:bg-purple-900"
                         : virtualRow.index % 2 === 0
                         ? "bg-muted/30"
                         : ""
@@ -507,8 +513,11 @@ export function OpcodeViewer({ onStackFieldsToggle, onToggleBreakpoint }: Opcode
                     </div>
                   </div>
                     </PanelContextMenuTrigger>
-                    {/* Notes: hidden until feature is complete
                     <PanelContextMenuContent>
+                      <PanelContextMenuItem onSelect={() => useDebugStore.getState().clearBackwardSliceHighlight()}>
+                        Clear Data Flow Highlight
+                      </PanelContextMenuItem>
+                      {/* Notes: hidden until feature is complete
                       <PanelContextMenuItem
                         onSelect={() => {
                           const stepIndex = useDebugStore.getState().currentStepIndex;
@@ -518,8 +527,8 @@ export function OpcodeViewer({ onStackFieldsToggle, onToggleBreakpoint }: Opcode
                       >
                         Mark This Step
                       </PanelContextMenuItem>
+                      */}
                     </PanelContextMenuContent>
-                    */}
                   </PanelContextMenu>
                 );
               })}

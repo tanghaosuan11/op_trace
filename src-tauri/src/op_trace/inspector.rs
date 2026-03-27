@@ -27,10 +27,12 @@ use revm_interpreter::{
     interpreter_types::{Jumps, MemoryTr},
     CallInput, CallScheme, CreateInputs, CreateOutcome, CreateScheme, 
 };
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use super::debug_session::{DebugSession, FrameRecord, StorageChangeRecord, TraceStep};
 use super::message_encoder::MessageEncoder;
+use super::shadow::ShadowState;
 use super::AlloyCacheDB;
 use crate::op_trace::types::CallKind;
 
@@ -83,10 +85,18 @@ pub(crate) struct Cheatcodes<BlockT, TxT, CfgT> {
     gas_tracer: GasTracer,
     log_tracer: LogTracer,
     // bytecode_tracer: BytecodeTracer,
+    shadow: ShadowState,
+    shadow_temp_dir: PathBuf,
+    shadow_enabled: bool,
 }
 
 impl<BlockT, TxT, CfgT> Cheatcodes<BlockT, TxT, CfgT> {
-    pub(crate) fn new(encoder: MessageEncoder, debug_session: Arc<Mutex<DebugSession>>) -> Self {
+    pub(crate) fn new(
+        encoder: MessageEncoder,
+        debug_session: Arc<Mutex<DebugSession>>,
+        shadow_temp_dir: PathBuf,
+        shadow_enabled: bool,
+    ) -> Self {
         Self {
             step_info: StepInfo::default(),
             bytecode: Bytecode::default(),
@@ -101,6 +111,9 @@ impl<BlockT, TxT, CfgT> Cheatcodes<BlockT, TxT, CfgT> {
             gas_tracer: GasTracer::new(),
             log_tracer: LogTracer::new(),
             // bytecode_tracer: BytecodeTracer::new(),
+            shadow: ShadowState::with_temp_dir(shadow_temp_dir.clone()),
+            shadow_temp_dir,
+            shadow_enabled,
         }
     }
 
@@ -114,6 +127,14 @@ impl<BlockT, TxT, CfgT> Cheatcodes<BlockT, TxT, CfgT> {
 
     pub(crate) fn send_finished(&self) {
         self.encoder.send_finished();
+    }
+
+    /// 取出 ShadowState 用于存入 DebugSession
+    pub(crate) fn take_shadow(&mut self) -> ShadowState {
+        std::mem::replace(
+            &mut self.shadow,
+            ShadowState::with_temp_dir(self.shadow_temp_dir.clone()),
+        )
     }
 
     pub(crate) fn send_balance_changes(&self, json: &str) {
@@ -399,6 +420,18 @@ where
         // 记录当前 step 计数供 LogTracer 使用
         self.log_tracer.record_current_step_count(self.step_info.step_count);
 
+        // 数据流追踪：影子栈/内存/存储
+        if self.shadow_enabled {
+            self.shadow.on_step(
+                opcode,
+                self.step_info.pc,
+                self.step_info.step_count,
+                interp.stack.data(),
+                self.frame_manager.current_target(),
+                self.frame_manager.current_id(),
+            );
+        }
+
         self.step_info.step_count += 1;
     }
 
@@ -407,6 +440,12 @@ where
         interp: &mut revm::interpreter::Interpreter<EthInterpreter>,
         context: &mut Context<BlockT, TxT, CfgT, AlloyCacheDB, OpTraceJournal<AlloyCacheDB>>,
     ) {
+        let finished_step = self.step_info.step_count.saturating_sub(1) as u32;
+        if self.shadow_enabled {
+            self.shadow
+                .record_step_end_stack(finished_step, interp.stack.data());
+        }
+
         self.gas_tracer.backfill_gas_cost(interp);
 
         // 回填 DebugSession 中最后一步的 gas_cost
@@ -536,6 +575,11 @@ where
                 success: false,
             });
         self.send_frame_enter();
+        // shadow: 推入新帧
+        let input_len = self.frame_manager.current_frame().map(|f| f.input.len()).unwrap_or(0);
+        if self.shadow_enabled {
+            self.shadow.push_frame(input_len);
+        }
         None
     }
 
@@ -588,6 +632,13 @@ where
         }
 
         self.flush_steps();
+        // shadow: 弹出子帧，写入返回数据影子到父帧内存
+        let ret_mem_offset = _inputs.return_memory_offset.start;
+        let ret_mem_len = _inputs.return_memory_offset.len();
+        let output_len_for_shadow = output.len();
+        if self.shadow_enabled {
+            self.shadow.pop_frame(ret_mem_offset, ret_mem_len, output_len_for_shadow);
+        }
         self.encoder
             .send_frame_exit(frame_id, result, success, gas_used, &output);
         self.frame_manager.pop_frame();
@@ -648,6 +699,11 @@ where
                 success: false,
             });
         self.send_frame_enter();
+        // shadow: 推入新帧（CREATE 的 calldata 来自 init_code）
+        let init_code_len = self.frame_manager.current_frame().map(|f| f.input.len()).unwrap_or(0);
+        if self.shadow_enabled {
+            self.shadow.push_frame(init_code_len);
+        }
         None
     }
 
@@ -680,6 +736,10 @@ where
         let deployed_addr = _outcome.address.unwrap_or(Address::ZERO);
         self.send_frame_update_address(deployed_addr);
         self.flush_steps();
+        // shadow: 弹出子帧（CREATE 没有 retOffset/retSize 写入父帧）
+        if self.shadow_enabled {
+            self.shadow.pop_frame(0, 0, output.len());
+        }
         self.encoder
             .send_frame_exit(frame_id, result, success, gas_used, &output);
         self.frame_manager.pop_frame();

@@ -13,6 +13,7 @@ import { TestDialog } from "@/components/TestDialog";
 import { GlobalLogDrawer } from "@/components/GlobalLogDrawer";
 import { UtilitiesDrawer } from "@/components/UtilitiesDrawer";
 import { AnalysisDrawer } from "@/components/AnalysisDrawer";
+import { DataFlowDrawer } from "@/components/DataFlowModal";
 // import { NotesDrawer } from "@/components/NotesDrawer";
 import { BookmarksDrawer } from "@/components/BookmarksDrawer";
 import { CondListDrawer } from "@/components/CondListDrawer";
@@ -437,6 +438,17 @@ function App() {
       <GlobalLogDrawer onSeekTo={seekToWithHistory} />
       <UtilitiesDrawer />
       <AnalysisDrawer />
+      <DataFlowDrawer
+        isOpen={useDebugStore((s) => s.isDataFlowModalOpen)}
+        onClose={useCallback(() => useDebugStore.getState().closeDataFlowModal(), [])}
+        rootId={useDebugStore((s) => s.dataFlowTreeRootId)}
+        nodes={useDebugStore((s) => s.dataFlowTreeNodes)}
+        onStepSelect={(globalStep) => {
+          console.log('[DataFlowDrawer] Jumping to global_step:', globalStep);
+          // global_step 对应 allStepsRef 的索引
+          seekToWithHistory(globalStep);
+        }}
+      />
       {/* <NotesDrawer onSeekTo={seekToWithHistory} /> */}
       <Toaster />
     </div>

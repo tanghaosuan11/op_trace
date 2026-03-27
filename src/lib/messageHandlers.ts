@@ -26,6 +26,13 @@ const _frameByCtx = new Map<number, CallFrame>();
 
 // bytecode hash → 反汇编结果缓存，避免同一合约重复 disassemble
 const _disasmCache = new Map<string, Opcode[]>();
+let _debugStartPerfMs: number | null = null;
+let _finishedPerfLogged = false;
+
+export function markDebugPerfStart() {
+    _debugStartPerfMs = performance.now();
+    _finishedPerfLogged = false;
+}
 
 function _hashBytecode(bytes: Uint8Array): string {
     // FNV-1a 32-bit
@@ -41,6 +48,8 @@ export function resetPendingFrameEnters() {
     pendingFrameEnters.clear();
     _frameByCtx.clear();
     _disasmCache.clear();
+    _debugStartPerfMs = null;
+    _finishedPerfLogged = false;
 }
 
 // ─── 节流：setCallFrames 最多每 200ms 触发一次 ─────────────────────────────────
@@ -556,6 +565,13 @@ export function handleMessage(
             const totalSteps = context.allStepsRef.current.length;
             context.setStepCount(totalSteps);
             context.setIsDebugging(false);
+            if (_debugStartPerfMs !== null && !_finishedPerfLogged) {
+                const elapsedMs = performance.now() - _debugStartPerfMs;
+                console.log(
+                    `[perf.frontend] startDebug -> Finished in ${elapsedMs.toFixed(1)}ms (${totalSteps.toLocaleString()} steps)`
+                );
+                _finishedPerfLogged = true;
+            }
             toast.success(`Ready — ${totalSteps.toLocaleString()} steps`, { id: "debug-finished" });
             break;
         }

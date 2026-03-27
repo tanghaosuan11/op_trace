@@ -132,6 +132,7 @@ export function MainInterface({
               Test Parse
             </Button>
           )}
+
         </div>
       </div>
       <div className="flex-1 min-h-0 flex flex-col overflow-hidden relative">
@@ -248,6 +249,18 @@ export function MainInterface({
                       />
                       <span>Fork Mode</span>
                       <TooltipProvider delayDuration={0}><Tooltip><TooltipTrigger asChild><span className="flex-shrink-0 cursor-default"><HelpCircle className="h-3 w-3 text-muted-foreground" /></span></TooltipTrigger><TooltipContent side="top" className="max-w-[260px] text-xs">Enable fork mode to inject patches (stack/memory modifications) before re-running the transaction. Fork mode does not save cache.</TooltipContent></Tooltip></TooltipProvider>
+                    </label>
+                    <label className={`flex items-center gap-1.5 text-xs ${locked ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}>
+                      <Checkbox
+                        checked={config.enableShadow}
+                        disabled={locked}
+                        onCheckedChange={(v) => {
+                          const next = setConfig({ enableShadow: !!v });
+                          useDebugStore.getState().sync({ config: next });
+                        }}
+                      />
+                      <span>Shadow Trace</span>
+                      <TooltipProvider delayDuration={0}><Tooltip><TooltipTrigger asChild><span className="flex-shrink-0 cursor-default"><HelpCircle className="h-3 w-3 text-muted-foreground" /></span></TooltipTrigger><TooltipContent side="top" className="max-w-[260px] text-xs">Enable backend shadow data-flow tracking. Turn off for performance baseline measurement.</TooltipContent></Tooltip></TooltipProvider>
                     </label>
                     <label className={`flex items-center gap-1.5 text-xs ${locked ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}>
                       <Checkbox

@@ -31,7 +31,10 @@ export interface BackendConfig {
   rpcUrl: string;
   /** 使用 prestateTracer 精确预填状态（适用于块内非首笔交易） */
   usePrestate: boolean;  /** Fork 模式：传递 patches 重跑交易 */
-  forkMode: boolean;}
+  forkMode: boolean;
+  /** 是否启用 shadow 数据流追踪 */
+  enableShadow: boolean;
+}
 
 export type AppConfig = FrontendConfig & BackendConfig;
 
@@ -40,6 +43,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   useAlloyCache: true,
   usePrestate: false,
   forkMode: false,
+  enableShadow: false,
   pauseOpJump: true,
   pauseCondJump: true,
   rpcUrl: "https://mainnet.infura.io/v3/c60b0bb42f8a4c6481ecd229eddaca27",
@@ -87,5 +91,11 @@ export function setConfig(patch: Partial<AppConfig>): AppConfig {
 
 /** 提取后端需要的配置子集（debugActions.ts 中传给 invoke） */
 export function getBackendConfig(): BackendConfig {
-  return { useAlloyCache: _config.useAlloyCache, rpcUrl: _config.rpcUrl, usePrestate: _config.usePrestate, forkMode: _config.forkMode };
+  return {
+    useAlloyCache: _config.useAlloyCache,
+    rpcUrl: _config.rpcUrl,
+    usePrestate: _config.usePrestate,
+    forkMode: _config.forkMode,
+    enableShadow: _config.enableShadow,
+  };
 }

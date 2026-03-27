@@ -42,7 +42,9 @@ fn get_cache_path(app: &AppHandle, tx_hash: &str, chain_id: u64, block_num: u64,
     let dir = cache_dir.join("cache").join("evm_cache").join(chain_id.to_string());
     std::fs::create_dir_all(&dir).ok();
     let suffix = if prestate { "_pre" } else { "" };
-    dir.join(format!("{}_{}{}.bin", &tx_hash.trim_start_matches("0x")[..16], block_num, suffix))
+    // 使用完整 tx_hash（去除 0x 前缀）来避免碰撞，使用 block_num 作为版本控制
+    let clean_hash = tx_hash.trim_start_matches("0x").trim_start_matches("0X").to_lowercase();
+    dir.join(format!("{}_{}_{}{}.bin", clean_hash, block_num, "alloydb", suffix))
 }
 
 /// ERC20 Transfer(address,address,uint256) topic
@@ -166,41 +168,50 @@ pub(crate) fn compute_and_print_balance_changes(evm_state: &EvmState, logs: &[Lo
     format!("[{}]", json_entries.join(","))
 }
 
-fn save_cache(db: &AlloyCacheDB, path: &Path) {    match bincode::serialize(&db.cache) {
+fn save_cache(db: &AlloyCacheDB, path: &Path) {    
+    match bincode::serialize(&db.cache) {
         Ok(bytes) => {
             if let Err(e) = std::fs::write(path, bytes) {
-                eprintln!("[cache] write failed: {e}");
+                eprintln!("[cache] ✗ write failed: {e}");
             } else {
                 println!(
-                    "[cache] saved to {:?} ({} accounts, {} contracts)",
+                    "[cache] ✓ saved to {:?} ({} accounts, {} contracts)",
                     path,
                     db.cache.accounts.len(),
                     db.cache.contracts.len()
                 );
             }
         }
-        Err(e) => eprintln!("[cache] serialize failed: {e}"),
+        Err(e) => eprintln!("[cache] ✗ serialize failed: {e}"),
     }
 }
 
 fn load_cache(cache_db: &mut AlloyCacheDB, path: &Path) -> bool {
     let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(_) => return false,
+        Ok(b) => {
+            println!("[cache] file found: {:?}", path);
+            b
+        }
+        Err(e) => {
+            println!("[cache] file not found: {:?} ({})", path, e);
+            return false;
+        }
     };
     match bincode::deserialize::<Cache>(&bytes) {
         Ok(loaded) => {
             println!(
-                "[cache] loaded from {:?} ({} accounts, {} contracts)",
+                "[cache] ✓ loaded from {:?} ({} accounts, {} contracts)",
                 path,
                 loaded.accounts.len(),
                 loaded.contracts.len()
             );
             cache_db.cache = loaded;
+            println!("[cache] 🎯 CacheDB 已填充，后续 RPC 调用应该会被缓存覆盖");
             true
         }
         Err(e) => {
-            eprintln!("[cache] deserialize failed (stale?): {e}");
+            eprintln!("[cache] ✗ deserialize failed (stale?): {e}");
+            println!("[cache] 🔄 缓存文件损坏，将从 RPC 重新获取并覆盖");
             false
         }
     }
@@ -294,11 +305,13 @@ pub async fn op_trace(
     rpc_url: &str,
     use_alloy_cache: bool,
     use_prestate: bool,
+    enable_shadow: bool,
     patches: Vec<StatePatch>,
     channel: Channel,
     app_handle: AppHandle,
     session_state: Arc<Mutex<Option<DebugSession>>>,
 ) -> anyhow::Result<()> {
+    let op_trace_t0 = std::time::Instant::now();
     let is_fork = !patches.is_empty();
     // 创建新的 DebugSession 并存入全局状态
     let session = Arc::new(Mutex::new(DebugSession::new()));
@@ -307,9 +320,18 @@ pub async fn op_trace(
         *guard = None; // 清空上一次的 session
     }
 
+    let shadow_temp_dir = app_handle
+        .path()
+        .temp_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("optrace"));
     let encoder = MessageEncoder::new(channel);
     let base_inspector =
-        Cheatcodes::<BlockEnv, TxEnv, CfgEnv>::new(encoder, session.clone());
+        Cheatcodes::<BlockEnv, TxEnv, CfgEnv>::new(
+            encoder,
+            session.clone(),
+            shadow_temp_dir.clone(),
+            enable_shadow,
+        );
 
     let provider = ProviderBuilder::new().connect(rpc_url).await?.erased();
 
@@ -397,19 +419,26 @@ pub async fn op_trace(
 
     // 先从磁盘加载缓存（补全大量数据，减少 RPC 请求）
     let cache_path = get_cache_path(&app_handle, tx, chain_id, tx_data_block, use_prestate);
+    println!("[cache] 使用缓存路径: {:?}", cache_path);
+    
+    let mut cache_loaded = false;
     if use_alloy_cache {
-        let cache_hit = load_cache(&mut cache_db, &cache_path);
-        if !cache_hit {
-            println!("[cache] miss, will fetch from RPC");
+        cache_loaded = load_cache(&mut cache_db, &cache_path);
+        if !cache_loaded {
+            println!("[cache] ⚠️  无缓存文件，将从 RPC 拉取全部数据");
         }
     } else {
-        println!("[cache] disabled by user");
+        println!("[cache] ❌ 用户禁用了 AlloyDB 缓存");
     }
 
     // 再用 prestate 覆盖（精确值优先级最高，必须在 cache 之后写入）
+    let has_prestate = prestate_data.is_some();
     if let Some(prestate) = prestate_data {
+        let prestate_acct_count = prestate.len();
         apply_prestate(&mut cache_db, prestate);
+        println!("[cache] 📌 prestate 已覆盖 {} 个账户的精确数据（优先级最高）", prestate_acct_count);
     }
+    
 
     let env = Env::mainnet();
 
@@ -437,7 +466,7 @@ pub async fn op_trace(
     };
 
     // send_finished 必须推迟到 session 存入全局状态之后（前端收到 Finished 后立即 seek_to）
-    let (result, send_finished_fn): (_, Box<dyn FnOnce()>) = if is_fork {
+    let (result, shadow, send_finished_fn): (_, _, Box<dyn FnOnce()>) = if is_fork {
         let mut fi = ForkInspector::<BlockEnv, TxEnv, CfgEnv>::new_from_cheatcodes(
             base_inspector, patches,
         );
@@ -449,14 +478,19 @@ pub async fn op_trace(
             EthPrecompiles::new(SpecId::default()),
         );
         println!("[fork] start inspect tx with {} patches", patch_count);
+        let inspect_t0 = std::time::Instant::now();
         let result = evm.inspect_tx(tx);
+        let inspect_ms = inspect_t0.elapsed().as_secs_f64() * 1000.0;
+        println!("[perf.backend] inspect_tx(fork) done in {:.1}ms", inspect_ms);
         drop(evm); // 释放可变借用
         if let Ok(ref r) = result {
             let json = compute_and_print_balance_changes(&r.state, r.result.logs());
             fi.send_balance_changes(&json);
         }
         fi.flush_steps();
-        (result, Box::new(move || fi.send_finished()))
+        // fork 模式暂不支持 shadow 追踪
+        let shadow = super::shadow::ShadowState::with_temp_dir(shadow_temp_dir);
+        (result, shadow, Box::new(move || fi.send_finished()))
     } else {
         let mut inspector = base_inspector;
         // inspector.set_verify_memory(true); // 开启内存验证
@@ -467,7 +501,10 @@ pub async fn op_trace(
             EthPrecompiles::new(SpecId::default()),
         );
         println!("start inspect tx");
+        let inspect_t0 = std::time::Instant::now();
         let result = evm.inspect_tx(tx);
+        let inspect_ms = inspect_t0.elapsed().as_secs_f64() * 1000.0;
+        println!("[perf.backend] inspect_tx(main) done in {:.1}ms", inspect_ms);
         // 正常模式：先保存缓存（evm 还在），再 drop 释放可变借用
         if use_alloy_cache {
             save_cache(evm.ctx.journaled_state.db(), &cache_path);
@@ -478,12 +515,13 @@ pub async fn op_trace(
         drop(evm); // 释放可变借用
         inspector.send_balance_changes(&balance_json);
         inspector.flush_steps();
-        (result, Box::new(move || inspector.send_finished()))
+        let shadow = inspector.take_shadow();
+        (result, shadow, Box::new(move || inspector.send_finished()))
     };
 
     // 将 DebugSession 存入全局状态，供 seek_to 使用（必须在 send_finished 之前，否则前端收到 Finished 后立即 seek_to 会找不到 session）
     {
-        let finished_session = match Arc::try_unwrap(session) {
+        let mut finished_session = match Arc::try_unwrap(session) {
             Ok(mutex) => mutex.into_inner().unwrap(),
             Err(arc) => {
                 let mut lock = arc.lock().unwrap();
@@ -492,14 +530,20 @@ pub async fn op_trace(
         };
         let trace_len = finished_session.trace.len();
         let frame_count = finished_session.frame_memories.len();
+        let shadow_nodes = shadow.node_count();
+        finished_session.shadow = Some(shadow);
         *session_state.lock().unwrap() = Some(finished_session);
         println!(
-            "[seek] session stored: {} steps, {} frames",
-            trace_len, frame_count
+            "[seek] session stored: {} steps, {} frames, {} shadow nodes",
+            trace_len, frame_count, shadow_nodes
         );
     }
 
     send_finished_fn();
+    println!(
+        "[perf.backend] op_trace total done in {:.1}ms",
+        op_trace_t0.elapsed().as_secs_f64() * 1000.0
+    );
 
     match result {
         Ok(res) => {

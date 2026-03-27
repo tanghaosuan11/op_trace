@@ -35,7 +35,12 @@ impl<BlockT, TxT, CfgT> ForkInspector<BlockT, TxT, CfgT> {
     ) -> Self {
         patches.sort_by_key(|p| p.step_index);
         Self {
-            inner: Cheatcodes::new(encoder, debug_session),
+            inner: Cheatcodes::new(
+                encoder,
+                debug_session,
+                std::env::temp_dir().join("optrace"),
+                true,
+            ),
             patches,
             next_patch_idx: 0,
             global_step: 0,

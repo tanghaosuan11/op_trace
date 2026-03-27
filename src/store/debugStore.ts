@@ -173,6 +173,20 @@ export interface UISlice {
   testOpcodes: Array<{ pc: number; name: string; data?: string }>;
   // 全量缓存模式（fullDataCache 已就绪）
   isCacheMode: boolean;
+  // 数据流回溯高亮
+  backwardSliceHighlight: Set<number>;
+  // 数据流树形显示
+  isDataFlowModalOpen: boolean;
+  dataFlowTreeRootId: number;
+  dataFlowTreeNodes: Array<{
+    id: number;
+    global_step: number;
+    pc: number;
+    opcode: number;
+    opcode_name: string;
+    parent_ids: number[];
+    stack_value_post?: string;
+  }>;
 }
 
 const initialUI: UISlice = {
@@ -191,6 +205,10 @@ const initialUI: UISlice = {
   testBytecode: "",
   testOpcodes: [],
   isCacheMode: false,
+  backwardSliceHighlight: new Set<number>(),
+  isDataFlowModalOpen: false,
+  dataFlowTreeRootId: 0,
+  dataFlowTreeNodes: [],
 };
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -261,6 +279,25 @@ export interface DebugActions {
   removeStepMark: (id: string) => void;
   /** 更新步数标记备注 */
   updateStepMarkNote: (id: string, note: string) => void;
+  /** 设置数据流回溯高亮步骤 */
+  setBackwardSliceHighlight: (steps: number[]) => void;
+  /** 清除数据流回溯高亮 */
+  clearBackwardSliceHighlight: () => void;
+  /** 打开数据流树形模态框 */
+  openDataFlowModal: (
+    rootId: number,
+    nodes: Array<{
+      id: number;
+      global_step: number;
+      pc: number;
+      opcode: number;
+      opcode_name: string;
+      parent_ids: number[];
+      stack_value_post?: string;
+    }>
+  ) => void;
+  /** 关闭数据流树形模态框 */
+  closeDataFlowModal: () => void;
 }
 
 const initialState: DebugState = {
@@ -319,4 +356,16 @@ export const useDebugStore: UseBoundStore<StoreApi<DebugStore>> = create<DebugSt
   updateStepMarkNote: (id, note) => set((s) => ({
     stepMarks: s.stepMarks.map((m) => m.id === id ? { ...m, note } : m),
   })),
+
+  setBackwardSliceHighlight: (steps) => set({ backwardSliceHighlight: new Set(steps) }),
+  clearBackwardSliceHighlight: () => set({ backwardSliceHighlight: new Set<number>() }),
+
+  openDataFlowModal: (rootId, nodes) => set({
+    isDataFlowModalOpen: true,
+    dataFlowTreeRootId: rootId,
+    dataFlowTreeNodes: nodes,
+  }),
+  closeDataFlowModal: () => set({
+    isDataFlowModalOpen: false,
+  }),
 }));
