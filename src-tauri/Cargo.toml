@@ -1,6 +1,6 @@
 [package]
 name = "optrace"
-version = "0.1.6"
+version = "0.1.7"
 description = "A Tauri-based EVM execution tracer and debugger"
 authors = ["TangHaoSuan"]
 edition = "2021"
