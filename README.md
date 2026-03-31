@@ -207,7 +207,7 @@ pnpm tauri build
 If this tool has been helpful to you, feel free to buy me a coffee.
 got liquidated on-chain, currently grinding to pay off debts .
 
-EVM Address: `0x80430453B59e881A3bFd21c7b93ce57C1BF26182`
+EVM Address: `0xCa6D18615e4EB3Fa58ceB0155234E0F6b3A5e312`
 
 ---
 
