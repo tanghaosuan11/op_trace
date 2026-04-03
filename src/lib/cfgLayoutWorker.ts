@@ -4,9 +4,9 @@
  * Message in:  { id: string; dot: string }
  * Message out: { id: string; svg: string } | { id: string; error: string }
  *
- * Uses `@hpcc-js/wasm` synchronous API (worker-safe).
+ * Uses `@hpcc-js/wasm/graphviz` synchronous API (worker-safe).
  */
-import { Graphviz } from "@hpcc-js/wasm";
+import { Graphviz } from "@hpcc-js/wasm/graphviz";
 
 interface LayoutRequest {
   id: string;

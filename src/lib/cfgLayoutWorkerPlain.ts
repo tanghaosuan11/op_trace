@@ -7,7 +7,7 @@
  * Message in:  { id: string; dot: string }
  * Message out: { id: string; plain: string } | { id: string; error: string }
  */
-import { Graphviz } from "@hpcc-js/wasm";
+import { Graphviz } from "@hpcc-js/wasm/graphviz";
 
 interface LayoutRequest {
   id: string;

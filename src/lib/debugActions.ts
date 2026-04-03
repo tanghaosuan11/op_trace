@@ -371,14 +371,23 @@ export async function resetAllAction(deps: ResetAllDeps) {
 
   const { config, txSlots, txDataList, debugByTx } = useDebugStore.getState();
 
+  const clearedSlots = txSlots.map((s) => ({
+    ...s,
+    txData: null,
+    blockData: null,
+    error: "",
+    isFetching: false,
+  }));
+
   useDebugStore.getState().resetStore();
 
   useDebugStore.getState().sync({
     config,
     sessionId: deps.sessionId,
-    txSlots,
+    txSlots: clearedSlots,
     txDataList,
     debugByTx,
+    ...deriveFromTxSlots(clearedSlots),
   });
 
   resetPendingFrameEnters(deps.runtime);

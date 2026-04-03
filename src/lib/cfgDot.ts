@@ -1,5 +1,5 @@
 /**
- * CFG → Graphviz DOT for `@hpcc-js/wasm` (`layout(dot, "svg", "dot")`).
+ * CFG → Graphviz DOT for `@hpcc-js/wasm/graphviz` (`layout(dot, "svg", "dot")`).
  * Styling lives here for instant Vite HMR.
  *
  * **Node size (adaptive width):** Graphviz recommends `shape=plain` for HTML labels:
