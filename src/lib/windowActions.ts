@@ -84,16 +84,9 @@ export function openCfgWindow(sessionId: string, opts?: { readonly?: boolean }) 
   window.once("tauri://created", () => {
     window.setFocus().catch(() => {});
   });
-  window.once("tauri://created", () => {
-    const init = { sessionId };
-    const emitOnce = (tag: string) =>
-      window.emit("optrace:cfg:init", init).then(
-        () => console.log(`[cfg.window] emit optrace:cfg:init ok (${tag})`),
-        (e) => console.error(`[cfg.window] emit optrace:cfg:init failed (${tag})`, e),
-      );
-    setTimeout(() => emitOnce("t+250ms"), 250);
-    setTimeout(() => emitOnce("t+1250ms"), 1250);
-  });
+  // 不要在这里发 optrace:cfg:init：init 会清空 CFG 帧表，且此处没有配套的 frame_batch，
+  // 会在主进程已推送数据之后再次清空列表（常见现象：闪一下又变空）。
+  // 会话同步由主窗口 handleOpenCfgWindow 的 emitCfgInit + emitCfgFrameBatch 负责。
   return { window, sessionId };
 }
 

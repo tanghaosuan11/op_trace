@@ -237,6 +237,7 @@ function App() {
       if (!sid) return;
       // Always reset frames on init — this is always a "fresh start" signal
       // (same sessionId on re-open must also reset, otherwise 3 snapshots×3 = triple counts).
+      console.info("[cfg] optrace:cfg:init", { sid });
       setCfgFrames(new Map());
       setCfgSessionId(sid);
     });
@@ -246,7 +247,16 @@ function App() {
       (ev) => {
         const sid = (ev.payload?.sessionId || "").trim();
         const incoming = Array.isArray(ev.payload?.frames) ? ev.payload!.frames! : [];
-        if (!sid || incoming.length === 0) return;
+        if (!sid) return;
+        if (incoming.length === 0) {
+          console.info("[cfg] optrace:cfg:frame_batch (empty skipped)", { sid });
+          return;
+        }
+        console.info("[cfg] optrace:cfg:frame_batch", {
+          sid,
+          entries: incoming.length,
+          keys: incoming.map((f) => makeCfgFrameKey(f.transactionId, f.contextId)),
+        });
         setCfgSessionId((prev) => prev || sid);
         setCfgFrames((prev) => {
           const next = new Map(prev);
@@ -291,8 +301,8 @@ function App() {
         depth: s.depth,
       }))
     );
-    // emit init alongside every batch so late-opened CFG windows can sync
-    void emitCfgInit(sid);
+    // 不要在这里 emitCfgInit：init 会清空 CFG 窗口的帧表，而本批只是增量切片；
+    // 清空后若本批只有子帧（如 DELEGATECALL 后），会丢掉主界面里已有的其它 context。
     void emitCfgFrameBatch(sid, frames);
   }, [stepCount, isCfgMode, sessionIdRef, allStepsRef]);
 
@@ -502,16 +512,22 @@ function App() {
   }, [startDebug]);
 
   // Reset all
-  const resetAll = useCallback(() => resetAllAction({
-    sessionId: sessionIdRef.current,
-    allStepsRef, callFramesRef, callTreeRef,
-    stepIndexByContext: stepIndexByContextRef,
-    opcodeIndex: opcodeIndexRef,
-    runtime: messageRuntimeRef.current,
-    fullDataCache: fullDataCacheRef,
-    resetPlayback: reset,
-    resetNav,
-  }), [reset, resetNav, sessionIdRef]);
+  const resetAll = useCallback(() => {
+    cfgEmittedIndexRef.current = 0;
+    void resetAllAction({
+      sessionId: sessionIdRef.current,
+      allStepsRef, callFramesRef, callTreeRef,
+      stepIndexByContext: stepIndexByContextRef,
+      opcodeIndex: opcodeIndexRef,
+      runtime: messageRuntimeRef.current,
+      fullDataCache: fullDataCacheRef,
+      resetPlayback: reset,
+      resetNav,
+    }).then(() => {
+      const sid = sessionIdRef.current;
+      if (sid) void emitCfgInit(sid);
+    });
+  }, [reset, resetNav, sessionIdRef]);
 
   // Debug dump
   const handleDebugDump = useCallback(
@@ -538,7 +554,7 @@ function App() {
     console.log("[cfg.send] open", { sid, allSteps: allStepsRef.current.length });
     // Ensure late-opened cfg window receives existing trace.
     cfgEmittedIndexRef.current = 0;
-    const sendSnapshot = (tag: string) => {
+    const sendSnapshot = (tag: string, withSessionReset: boolean) => {
       const all = allStepsRef.current;
       // Aggregate frames instead of sending 700k raw steps over IPC
       const frames = aggregateStepsToFrames(
@@ -552,14 +568,19 @@ function App() {
           depth: s.depth,
         }))
       );
-      console.log("[cfg.send] snapshot", { tag, sid, frames: frames.length, steps: all.length });
-      void emitCfgInit(sid);
+      console.log("[cfg.send] snapshot", { tag, sid, frameEntries: frames.length, steps: all.length });
+      if (frames.length === 0) {
+        console.warn("[cfg.send] aggregateStepsToFrames returned 0 entries — CFG list will stay empty until steps exist.");
+      }
+      if (withSessionReset) {
+        void emitCfgInit(sid);
+      }
       void emitCfgFrameBatch(sid, frames);
     };
     window.once("tauri://created", () => {
-      sendSnapshot("created");
-      setTimeout(() => sendSnapshot("t+300ms"), 300);
-      setTimeout(() => sendSnapshot("t+1200ms"), 1200);
+      sendSnapshot("created", true);
+      setTimeout(() => sendSnapshot("t+300ms", false), 300);
+      setTimeout(() => sendSnapshot("t+1200ms", false), 1200);
     });
   }, [sessionIdRef, allStepsRef]);
 
