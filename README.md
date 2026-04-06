@@ -2,7 +2,7 @@
 
 OpTrace is a high-performance, open-source EVM Debugger for deep-dive Ethereum transaction replaying, state inspection, advanced condition scanning, and what-if fork debugging.
 
-<video src="https://github.com/user-attachments/assets/6811a723-f13c-48e9-8799-827e64d9bee7"
+<video src="https://github.com/user-attachments/assets/ac723ff6-48c3-4bc6-a0bf-c3f86588c89d"
        width="100%" muted autoplay loop playsinline controls>
 </video>
 
