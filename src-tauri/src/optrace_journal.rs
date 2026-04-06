@@ -1,17 +1,20 @@
+use std::cmp::Ordering;
+
 use revm::{
     context::{
         journaled_state::{account::JournaledAccount, AccountInfoLoad, JournalLoadError},
     },
     context_interface::{
         journaled_state::{AccountLoad, JournalCheckpoint, TransferError},
-        JournalTr, 
+        JournalTr,
     },
- 
-    inspector::{ JournalExt},
+
+    inspector::JournalExt,
     interpreter::{SStoreResult,
         SelfDestructResult, StateLoad,
     },
     primitives::{
+        hex::FromHex,
         hardfork::SpecId, Address, AddressMap, AddressSet,
         HashSet, Log, StorageKey, StorageValue, B256, U256,
     },
@@ -24,12 +27,16 @@ use std::{ fmt::Debug};
 use std::collections::HashMap as HM;
 
 
+type EthDeltasMap = HM<u32, HM<Address, (U256, U256)>>;
+
 #[derive(Debug)]
 pub struct OpTraceJournal<Db: Database> {
     journaled_state: Journal<Db>,
     current_transaction_id: u32,
     /// ETH 余额变化（按交易分组）：address -> (gained, lost)
-    eth_deltas_by_tx: HM<u32, HM<Address, (U256, U256)>>,
+    eth_deltas_by_tx: EthDeltasMap,
+    /// 与 journal 的 checkpoint 对齐；REVERT 时恢复，避免子调用回滚后仍累计 transfer 记录
+    eth_deltas_snapshots: Vec<EthDeltasMap>,
 }
 
 impl<Db: Database> OpTraceJournal<Db> {
@@ -40,6 +47,7 @@ impl<Db: Database> OpTraceJournal<Db> {
             journaled_state,
             current_transaction_id: 0,
             eth_deltas_by_tx: HM::new(),
+            eth_deltas_snapshots: Vec::new(),
         }
     }
 
@@ -51,8 +59,21 @@ impl<Db: Database> OpTraceJournal<Db> {
         self.current_transaction_id = tid;
     }
 
-    pub fn take_eth_deltas_by_tx(&mut self) -> HM<u32, HM<Address, (U256, U256)>> {
+    pub fn take_eth_deltas_by_tx(&mut self) -> EthDeltasMap {
         std::mem::take(&mut self.eth_deltas_by_tx)
+    }
+
+    #[inline]
+    fn push_eth_snapshot(&mut self) {
+        self.eth_deltas_snapshots
+            .push(self.eth_deltas_by_tx.clone());
+    }
+
+    #[inline]
+    fn pop_eth_snapshot_restore(&mut self) {
+        if let Some(prev) = self.eth_deltas_snapshots.pop() {
+            self.eth_deltas_by_tx = prev;
+        }
     }
 
     fn record_eth_gain(&mut self, address: Address, amount: U256) {
@@ -226,19 +247,23 @@ impl<Db: Database + 'static> JournalTr for OpTraceJournal<Db> {
     }
 
     fn clear(&mut self) {
+        self.eth_deltas_snapshots.clear();
         self.journaled_state.clear();
     }
 
     fn checkpoint(&mut self) -> JournalCheckpoint {
+        self.push_eth_snapshot();
         self.journaled_state.checkpoint()
     }
 
     fn checkpoint_commit(&mut self) {
-        self.journaled_state.checkpoint_commit()
+        self.journaled_state.checkpoint_commit();
+        let _ = self.eth_deltas_snapshots.pop();
     }
 
     fn checkpoint_revert(&mut self, checkpoint: JournalCheckpoint) {
-        self.journaled_state.checkpoint_revert(checkpoint)
+        self.journaled_state.checkpoint_revert(checkpoint);
+        self.pop_eth_snapshot_restore();
     }
 
     fn create_account_checkpoint(
@@ -248,8 +273,18 @@ impl<Db: Database + 'static> JournalTr for OpTraceJournal<Db> {
         balance: U256,
         spec_id: SpecId,
     ) -> Result<JournalCheckpoint, TransferError> {
-        self.journaled_state
+        // 内部会调用 inner.checkpoint()，不经过本 struct 的 checkpoint()，这里单独压栈
+        self.push_eth_snapshot();
+        match self
+            .journaled_state
             .create_account_checkpoint(caller, address, balance, spec_id)
+        {
+            Ok(cp) => Ok(cp),
+            Err(e) => {
+                self.pop_eth_snapshot_restore();
+                Err(e)
+            }
+        }
     }
 
     /// Returns call depth.
@@ -260,6 +295,7 @@ impl<Db: Database + 'static> JournalTr for OpTraceJournal<Db> {
 
     fn finalize(&mut self) -> Self::State {
         println!("[OpTraceJournal] finalize called at depth {}", self.depth());
+        self.eth_deltas_snapshots.clear();
         self.journaled_state.finalize()
     }
 
@@ -293,11 +329,15 @@ impl<Db: Database + 'static> JournalTr for OpTraceJournal<Db> {
 
     fn commit_tx(&mut self) {
         println!("[OpTraceJournal] commit_tx called at depth {}", self.depth());
+        self.eth_deltas_snapshots.clear();
         self.journaled_state.commit_tx()
     }
 
     fn discard_tx(&mut self) {
-        self.journaled_state.discard_tx()
+        let tid = self.current_transaction_id;
+        self.eth_deltas_snapshots.clear();
+        self.journaled_state.discard_tx();
+        self.eth_deltas_by_tx.remove(&tid);
     }
 
     fn sload_skip_cold_load(
@@ -367,5 +407,86 @@ impl<Db: Database + 'static> JournalExt for OpTraceJournal<Db> {
 
     fn evm_state_mut(&mut self) -> &mut EvmState {
         self.journaled_state.evm_state_mut()
+    }
+}
+
+/// 供 `patch_applier` 在泛型 `Context` 上约束 `journal_mut()`（仅 `OpTraceJournal` 实现）
+pub trait OpTraceBalancePatch {
+    fn apply_fork_balance_absolute(
+        &mut self,
+        addr: Address,
+        target: U256,
+        sink_primary: Address,
+        patch_log_enabled: bool,
+    );
+}
+
+impl<Db: Database + 'static> OpTraceBalancePatch for OpTraceJournal<Db> {
+    fn apply_fork_balance_absolute(
+        &mut self,
+        addr: Address,
+        target: U256,
+        sink_primary: Address,
+        patch_log_enabled: bool,
+    ) {
+        let sink_alt =
+            Address::from_hex("0x000000000000000000000000000000000000dead").expect("dead sink");
+
+        if let Err(e) = self.load_account(addr) {
+            if patch_log_enabled {
+                eprintln!("[PatchApplier] load_account {:?}: {e:?}", addr);
+            }
+            return;
+        }
+
+        let current = self
+            .journaled_state
+            .evm_state()
+            .get(&addr)
+            .map(|a| a.info.balance)
+            .unwrap_or(U256::ZERO);
+
+        match target.cmp(&current) {
+            Ordering::Equal => {}
+            Ordering::Greater => {
+                let d = target - current;
+                if let Err(e) = self.balance_incr(addr, d) {
+                    if patch_log_enabled {
+                        eprintln!("[PatchApplier] balance_incr {:?} +{:?}: {e:?}", addr, d);
+                    }
+                }
+            }
+            Ordering::Less => {
+                let d = current - target;
+                let to = if addr == sink_primary {
+                    sink_alt
+                } else {
+                    sink_primary
+                };
+                if addr == to {
+                    if patch_log_enabled {
+                        eprintln!("[PatchApplier] balance decrease: addr equals sink, skip");
+                    }
+                    return;
+                }
+                match self.transfer(addr, to, d) {
+                    Ok(terr) => {
+                        if let Some(te) = terr {
+                            if patch_log_enabled {
+                                eprintln!(
+                                    "[PatchApplier] transfer {:?} -> {:?} amount {:?}: {te:?}",
+                                    addr, to, d
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if patch_log_enabled {
+                            eprintln!("[PatchApplier] transfer err: {e:?}");
+                        }
+                    }
+                }
+            }
+        }
     }
 }

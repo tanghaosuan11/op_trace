@@ -67,9 +67,37 @@ pub fn seek_to_impl(
         };
 
         let step = &session.trace[last_global];
+        let frame_has_ended = global_index > last_global
+            && session
+                .frame_terminal_states
+                .contains_key(&(*tid, *ctx_id));
 
-        // 计算内存
-        let mem_bytes = session.compute_memory_at_step(*tid, *ctx_id, step.frame_step);
+        // frame 已结束时优先返回 terminal/post-state，避免子 frame 永远停在 RETURN 前
+        let (pc, gas_cost, stack, mem_bytes) = if frame_has_ended {
+            if let Some(terminal) = session.frame_terminal_states.get(&(*tid, *ctx_id)) {
+                (
+                    terminal.pc,
+                    step.gas_cost,
+                    terminal.stack.clone(),
+                    terminal.memory.clone(),
+                )
+            } else {
+                (
+                    step.pc,
+                    step.gas_cost,
+                    step.stack.clone(),
+                    session.compute_memory_at_step(*tid, *ctx_id, step.frame_step),
+                )
+            }
+        } else {
+            (
+                step.pc,
+                step.gas_cost,
+                step.stack.clone(),
+                session.compute_memory_at_step(*tid, *ctx_id, step.frame_step),
+            )
+        };
+
         let memory = if mem_bytes.is_empty() {
             "0x".to_string()
         } else {
@@ -82,7 +110,7 @@ pub fn seek_to_impl(
         };
 
         // 转换 stack 为 hex strings
-        let stack: Vec<String> = step.stack.iter().map(|v| {
+        let stack: Vec<String> = stack.iter().map(|v| {
             let bytes = v.to_be_bytes::<32>();
             let mut s = String::with_capacity(66);
             s.push_str("0x");
@@ -95,8 +123,8 @@ pub fn seek_to_impl(
         frames.push(FrameState {
             transaction_id: *tid,
             context_id: *ctx_id,
-            pc: step.pc,
-            gas_cost: step.gas_cost,
+            pc,
+            gas_cost,
             stack,
             memory,
         });

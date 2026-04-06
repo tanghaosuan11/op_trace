@@ -15,9 +15,11 @@ import { DataFlowDrawer } from "@/components/DataFlowModal";
 import { CfgWindow } from "@/components/CfgWindow";
 // import { NotesDrawer } from "@/components/NotesDrawer";
 import { BookmarksDrawer } from "@/components/BookmarksDrawer";
+import { StepPlaybackFloatingBar } from "@/components/StepPlaybackFloatingBar";
 import { CondScanDrawer } from "@/components/CondScanDrawer";
 import { FloatingPanelProvider } from "@/components/floating-panel";
 import { Toaster } from "@/components/ui/sonner";
+import { toast } from "sonner";
 import "./App.css";
 import { type CallFrame, type CallTreeNode } from "./lib/types";
 import { useDebugPlayback } from "./hooks/useDebugPlayback";
@@ -28,6 +30,7 @@ import { startDebugAction, resetAllAction, debugDump } from "./lib/debugActions"
 import { useNavigation } from "./hooks/useNavigation";
 import { useConditionScan } from "./hooks/useConditionScan";
 import { useBreakpoints } from "./hooks/useBreakpoints";
+import { useStepPlayback } from "./hooks/useStepPlayback";
 import { useTabSync } from "./hooks/useTabSync";
 import { useFourbyteResolver } from "./hooks/useFourbyteResolver";
 import { useActiveFrameProjection } from "./hooks/useActiveFrameProjection";
@@ -46,6 +49,8 @@ import {
   makeCfgFrameKey,
   type CfgFrameEntry,
 } from "./lib/cfgBridge";
+import { extractStepIndicesFromAnalysisResult } from "@/lib/analysisResultStepIndices";
+import { frameTabId } from "@/lib/frameScope";
 
 
 function App() {
@@ -385,7 +390,56 @@ function App() {
 
   // Hooks
   const { runConditionScan, clearAllConditions } = useConditionScan(conditionHitSetRef);
-  const { handleBreakOpcodesChange, handleToggleBreakpoint } = useBreakpoints(breakOpcodesRef, breakpointPcsRef);
+  const {
+    handleBreakOpcodesChange,
+    handleToggleBreakpoint,
+    handleRemoveBreakpoint,
+    handleClearFrameBreakpoints,
+    handleClearAllBreakpoints,
+  } = useBreakpoints(breakOpcodesRef, breakpointPcsRef);
+
+  const handleInsertBreakpointsFromAnalysis = useCallback((resultText: string) => {
+    const indices = extractStepIndicesFromAnalysisResult(resultText);
+    if (indices.length === 0) {
+      toast.info("No stepIndex / global_step fields in result");
+      return;
+    }
+    const all = allStepsRef.current;
+    if (!all.length) {
+      toast.error("No trace loaded");
+      return;
+    }
+    const prev = useDebugStore.getState().breakpointPcsMap;
+    const next = new Map(prev);
+    let newPairs = 0;
+    let skipped = 0;
+    for (const idx of new Set(indices)) {
+      if (idx < 0 || idx >= all.length) {
+        skipped++;
+        continue;
+      }
+      const step = all[idx];
+      const frameId = frameTabId(step.transactionId, step.contextId);
+      const pcs = new Set(next.get(frameId) || []);
+      if (!pcs.has(step.pc)) newPairs++;
+      pcs.add(step.pc);
+      next.set(frameId, pcs);
+    }
+    breakpointPcsRef.current = next;
+    storeSync({ breakpointPcsMap: next });
+    if (newPairs === 0 && skipped === 0) {
+      toast.info("Those PCs already have breakpoints");
+      return;
+    }
+    if (newPairs === 0 && skipped > 0) {
+      toast.error(`No breakpoints added (${skipped} invalid step index)`);
+      return;
+    }
+    toast.success(
+      `Added ${newPairs} breakpoint(s)` + (skipped ? ` (${skipped} invalid index skipped)` : ""),
+    );
+  }, [allStepsRef, breakpointPcsRef, storeSync]);
+
   useTabSync(activeTabRef);
   useFourbyteResolver();
 
@@ -494,6 +548,8 @@ function App() {
 
   // Navigation
   const { navigateTo, seekToWithHistory, navBack, navForward, handleSelectFrame, handleGoBack, resetNav } = useNavigation(seekTo, activeTabRef);
+
+  const stepPlayback = useStepPlayback(navigateTo, allStepsRef);
 
   // Start debug
   const startDebug = useCallback(() => startDebugAction({
@@ -649,6 +705,12 @@ function App() {
               onStartDebug={startDebug}
               onOpenCfgWindow={handleOpenCfgWindow}
             />
+            <StepPlaybackFloatingBar
+              onLast={stepPlayback.onStepPlaybackLast}
+              onToggleAutoPlay={stepPlayback.toggleStepQueueAutoPlay}
+              onNext={stepPlayback.onStepPlaybackNext}
+              onClose={stepPlayback.onStepPlaybackBarClose}
+            />
 
             {/* Area below toolbar — drawers are anchored here */}
             <div className="flex-1 relative min-h-0 overflow-hidden">
@@ -692,6 +754,9 @@ function App() {
                 />
               </div>
               <BookmarksDrawer
+                onRemoveBreakpoint={handleRemoveBreakpoint}
+                onClearFrameBreakpoints={handleClearFrameBreakpoints}
+                onClearAllBreakpoints={handleClearAllBreakpoints}
                 onNavigate={(frameId, pc) => {
                   const m = /^frame-(\d+)-(\d+)$/.exec(frameId);
                   const stepIndex = m
@@ -722,7 +787,11 @@ function App() {
       </div>
 
       {/* 全局 Drawer 挂载点 */}
-      <DrawerHost onSeekToWithHistory={seekToWithHistory} />
+      <DrawerHost
+        onSeekToWithHistory={seekToWithHistory}
+        onInsertBreakpointsFromAnalysisResult={handleInsertBreakpointsFromAnalysis}
+        onReplacePlaybackFromAnalysisResult={stepPlayback.replacePlaybackQueueFromAnalysisResult}
+      />
       <DataFlowDrawer
         isOpen={useDebugStore((s) => s.isDataFlowModalOpen)}
         onClose={useCallback(() => useDebugStore.getState().closeDataFlowModal(), [])}

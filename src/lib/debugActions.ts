@@ -304,6 +304,12 @@ export async function startDebugAction(deps: StartDebugDeps) {
           step_index: p.stepIndex,
           stack_patches: p.stackPatches.map((sp) => [sp.pos, sp.value] as [number, string]),
           memory_patches: p.memoryPatches.map((mp) => [mp.offset, mp.value] as [number, string]),
+          storage_patches: (p.storagePatches ?? []).map(
+            (sp) => [sp.address, sp.slot, sp.value] as [string, string, string]
+          ),
+          balance_patches: (p.balancePatches ?? []).map(
+            (bp) => [bp.address, bp.value] as [string, string]
+          ),
         }))
       : null;
 

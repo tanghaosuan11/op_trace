@@ -87,6 +87,8 @@ struct ShadowFrame {
     calldata_shadow: Vec<NodeId>,
     /// RETURN/REVERT 前缓存的返回数据影子
     prepared_return_shadow: Vec<NodeId>,
+    /// RETURN/REVERT 栈参数 size；未执行过 RETURN/REVERT 则为 None（如预编译子调用）
+    return_opcode_size: Option<usize>,
 }
 
 /// 内存偏移上限（4MB），超出后忽略。
@@ -99,6 +101,7 @@ impl ShadowFrame {
             shadow_memory: Vec::new(),
             calldata_shadow: Vec::new(),
             prepared_return_shadow: Vec::new(),
+            return_opcode_size: None,
         }
     }
 
@@ -108,6 +111,7 @@ impl ShadowFrame {
             shadow_memory: Vec::new(),
             calldata_shadow,
             prepared_return_shadow: Vec::new(),
+            return_opcode_size: None,
         }
     }
 }
@@ -833,7 +837,7 @@ impl ShadowState {
                 NO_NODE
             }
 
-            // RETURN/REVERT: pop 2, prepare return shadow
+            // RETURN/REVERT: pop 2, prepare return shadow（读子帧内存；写父帧内存在 pop_frame）
             0xf3 | 0xfd => {
                 let offset_n = self.pop_shadow();
                 let size_n = self.pop_shadow();
@@ -841,8 +845,12 @@ impl ShadowState {
                 let size = Self::stack_val(stack, 1);
                 // 保存返回数据的影子到当前帧
                 let ret_shadow = self.memory_slice(offset, size);
-                self.current_frame_mut().prepared_return_shadow = ret_shadow;
-                let nid = self.alloc_node(gs, pc32, opcode, vec![offset_n, size_n]);
+                let cf = self.current_frame_mut();
+                cf.prepared_return_shadow = ret_shadow;
+                cf.return_opcode_size = Some(size);
+                let mut parents = vec![offset_n, size_n];
+                parents.extend(self.memory_parents(offset, size));
+                let nid = self.alloc_node(gs, pc32, opcode, parents);
                 nid
             }
 
@@ -977,18 +985,30 @@ impl ShadowState {
     ///
     /// - `ret_offset`, `ret_size`: 父帧中返回数据写入的 memory 区间
     /// - `output_len`: 实际返回数据长度
+    ///
+    /// EVM：RETURN/REVERT 的栈上 `size == 0` 时不向父帧 memory 复制任何字节；预编译等未执行 RETURN 的路径
+    /// `return_opcode_size` 为 None，仍按 `output_len` 写入父帧影子。
     pub fn pop_frame(&mut self, ret_offset: usize, ret_size: usize, output_len: usize) {
         let child = match self.frames.pop() {
             Some(f) => f,
             None => return,
         };
 
-        // 把子帧的 return data shadow 保存到全局（供 RETURNDATACOPY 使用）
-        self.return_data_shadow = child.prepared_return_shadow.clone();
+        let return_size_zero = matches!(child.return_opcode_size, Some(0));
 
-        // 将返回数据的影子写入父帧的 shadow_memory
+        // 与链上实际 output 对齐：预编译等路径可能未执行 RETURN，prepared 为空或长度与 output_len 不一致
+        let mut rd = child.prepared_return_shadow;
+        if rd.len() < output_len {
+            rd.resize(output_len, NO_NODE);
+        } else if rd.len() > output_len {
+            rd.truncate(output_len);
+        }
+        self.return_data_shadow = rd.clone();
+
+        // 将返回数据的影子写入父帧的 shadow_memory（EVM：仅当 RETURN/REVERT 的 size>0 时写入；
+        // 写入区间为父帧 [retOffset, retOffset+min(retSize,outputLen))）
         let write_size = output_len.min(ret_size);
-        if write_size > 0 && !child.prepared_return_shadow.is_empty() {
+        if write_size > 0 && !return_size_zero {
             // 检查写入范围是否合理，超出则忽略
             if ret_offset >= MAX_REASONABLE_MEMORY_OFFSET {
                 // 超出范围，不处理
@@ -1002,11 +1022,7 @@ impl ShadowState {
                     for i in 0..write_size {
                         let idx = ret_offset + i;
                         if idx < frame.shadow_memory.len() {
-                            let nid = child
-                                .prepared_return_shadow
-                                .get(i)
-                                .copied()
-                                .unwrap_or(NO_NODE);
+                            let nid = rd.get(i).copied().unwrap_or(NO_NODE);
                             frame.shadow_memory[idx] = nid;
                         }
                     }
@@ -1020,7 +1036,7 @@ impl ShadowState {
             if call_nid_usize < self.nodes.len() {
                 // 收集返回数据中的唯一节点，追加为 CALL 节点的 parent
                 let mut seen = HashSet::new();
-                for &nid in &child.prepared_return_shadow {
+                for &nid in &rd {
                     if nid != NO_NODE {
                         seen.insert(nid);
                     }

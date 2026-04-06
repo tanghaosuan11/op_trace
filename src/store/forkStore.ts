@@ -10,11 +10,26 @@ export interface MemoryPatch {
   value: string;  // hex data
 }
 
+/** Same as SSTORE: `address` must be this step's call target (see trace). */
+export interface StoragePatch {
+  address: string;
+  slot: string;
+  value: string;
+}
+
+/** Absolute ETH balance (wei, hex) for an address; runtime applies delta via journal. */
+export interface BalancePatch {
+  address: string;
+  value: string;
+}
+
 export interface StatePatch {
   id: string;
   stepIndex: number;
   stackPatches: StackPatch[];
   memoryPatches: MemoryPatch[];
+  storagePatches: StoragePatch[];
+  balancePatches: BalancePatch[];
 }
 
 export interface ForkState {

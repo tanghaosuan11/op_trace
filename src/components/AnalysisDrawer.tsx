@@ -4,7 +4,7 @@ import { BottomSheetShell } from "@/components/ui/bottom-sheet-shell";
 import { useDebugStore } from "@/store/debugStore";
 import { useDrawerActions } from "@/hooks/useDrawerActions";
 import { invoke } from "@tauri-apps/api/core";
-import { Play, Square, Trash2, Copy, Loader2, Pin, PinOff, Save, Folder, FileText, PanelLeftClose, PanelLeftOpen, RefreshCw } from "lucide-react";
+import { Play, Square, Trash2, Copy, Loader2, Pin, PinOff, Save, Folder, FileText, PanelLeftClose, PanelLeftOpen, RefreshCw, CircleDot, ListVideo } from "lucide-react";
 import {
   PanelContextMenu,
   PanelContextMenuTrigger,
@@ -17,8 +17,16 @@ import { Button } from "@/components/ui/button";
 import {
   BUILTIN_SCRIPTS,
 } from "@/lib/analysisScripts";
+import { extractStepIndicesFromAnalysisResult } from "@/lib/analysisResultStepIndices";
 
 const DEFAULT_SCRIPT = BUILTIN_SCRIPTS[0].code;
+
+export type AnalysisDrawerProps = {
+  /** Host resolves step indices → PC breakpoints (keeps Analysis UI free of breakpoint store details). */
+  onInsertBreakpointsFromResult?: (resultText: string) => void;
+  /** Replace step playback queue with indices from result (each run replaces previous). */
+  onReplaceStepsToPlaybackFromResult?: (resultText: string) => void;
+};
 
 // Script header filters (comments anywhere in file):
 //   // @filter opcodes:   SSTORE, SLOAD
@@ -428,7 +436,10 @@ function ScriptTreeDir({
   );
 }
 
-export function AnalysisDrawer() {
+export function AnalysisDrawer({
+  onInsertBreakpointsFromResult,
+  onReplaceStepsToPlaybackFromResult,
+}: AnalysisDrawerProps) {
   const isOpen = useDebugStore((s) => s.isAnalysisOpen);
   const sessionId = useDebugStore((s) => s.sessionId);
   const stepCount = useDebugStore((s) => s.stepCount);
@@ -792,6 +803,22 @@ export function AnalysisDrawer() {
     );
   }, [result, error]);
 
+  const handleBreakpointsFromResult = useCallback(() => {
+    if (!result.trim() || !onInsertBreakpointsFromResult) return;
+    onInsertBreakpointsFromResult(result);
+  }, [result, onInsertBreakpointsFromResult]);
+
+  const handleReplacePlaybackFromResult = useCallback(() => {
+    if (!result.trim() || !onReplaceStepsToPlaybackFromResult) return;
+    onReplaceStepsToPlaybackFromResult(result);
+  }, [result, onReplaceStepsToPlaybackFromResult]);
+
+  /** 与断点 / 队列逻辑一致：结果里至少有一个 stepIndex 类字段才可点 */
+  const hasStepIndicesInResult = useMemo(() => {
+    if (!result.trim() || error) return false;
+    return extractStepIndicesFromAnalysisResult(result).length > 0;
+  }, [result, error]);
+
   const handleEditorMount: OnMount = (editor) => {
     editorRef.current = editor;
     // Ctrl+Enter / Cmd+Enter to run
@@ -1073,6 +1100,40 @@ export function AnalysisDrawer() {
                   {pinned ? <Pin className="h-2.5 w-2.5" /> : <PinOff className="h-2.5 w-2.5" />}
                 </button>
                 <div className="w-px h-3 bg-border mx-0.5" aria-hidden />
+                {onInsertBreakpointsFromResult ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={handleBreakpointsFromResult}
+                    disabled={!result.trim() || !!error || !hasStepIndicesInResult}
+                    title={
+                      hasStepIndicesInResult
+                        ? "Add breakpoints at PCs for each stepIndex / global_step in result"
+                        : "No stepIndex / global_step in result"
+                    }
+                    className="h-5 shrink-0 gap-0.5 border-border/80 bg-background/80 px-1.5 py-0 text-[10px] font-medium leading-none shadow-none hover:bg-accent [&_svg]:size-2.5"
+                  >
+                    <CircleDot className="text-red-500" />
+                    Breakpoints
+                  </Button>
+                ) : null}
+                {onReplaceStepsToPlaybackFromResult ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={handleReplacePlaybackFromResult}
+                    disabled={!result.trim() || !!error || !hasStepIndicesInResult}
+                    title={
+                      hasStepIndicesInResult
+                        ? "Replace playback queue with stepIndex / global_step from result (opens bar)"
+                        : "No stepIndex / global_step in result"
+                    }
+                    className="h-5 shrink-0 gap-0.5 border-border/80 bg-background/80 px-1.5 py-0 text-[10px] font-medium leading-none shadow-none hover:bg-accent [&_svg]:size-2.5"
+                  >
+                    <ListVideo className="text-emerald-600" />
+                    Play
+                  </Button>
+                ) : null}
                 <Button
                   type="button"
                   variant="outline"

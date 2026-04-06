@@ -34,5 +34,47 @@ export function useBreakpoints(
     storeSync({ breakpointPcsMap: next });
   }, []);
 
-  return { handleBreakOpcodesChange, handleToggleBreakpoint };
+  /** 从列表中移除单个 PC 断点（与 toggle 一致地同步 ref + store） */
+  const handleRemoveBreakpoint = useCallback((frameId: string, pc: number) => {
+    const prev = useDebugStore.getState().breakpointPcsMap;
+    const next = new Map(prev);
+    const pcs = new Set(next.get(frameId) || []);
+    pcs.delete(pc);
+    if (pcs.size === 0) next.delete(frameId);
+    else next.set(frameId, pcs);
+    breakpointPcsRef.current = next;
+    storeSync({ breakpointPcsMap: next });
+  }, []);
+
+  /** 移除该 frame 下全部 PC 断点及对应 label */
+  const handleClearFrameBreakpoints = useCallback((frameId: string) => {
+    const prev = useDebugStore.getState().breakpointPcsMap;
+    const oldPcs = prev.get(frameId);
+    if (!oldPcs || oldPcs.size === 0) return;
+    const next = new Map(prev);
+    next.delete(frameId);
+    breakpointPcsRef.current = next;
+    storeSync({ breakpointPcsMap: next });
+    const rm = useDebugStore.getState().removeBreakpointLabel;
+    for (const pc of oldPcs) rm(pc);
+  }, []);
+
+  /** 清空所有 frame 的 PC 断点及全部 label */
+  const handleClearAllBreakpoints = useCallback(() => {
+    const prev = useDebugStore.getState().breakpointPcsMap;
+    if (prev.size === 0) return;
+    breakpointPcsRef.current = new Map();
+    storeSync({
+      breakpointPcsMap: new Map(),
+      breakpointLabels: new Map(),
+    });
+  }, []);
+
+  return {
+    handleBreakOpcodesChange,
+    handleToggleBreakpoint,
+    handleRemoveBreakpoint,
+    handleClearFrameBreakpoints,
+    handleClearAllBreakpoints,
+  };
 }

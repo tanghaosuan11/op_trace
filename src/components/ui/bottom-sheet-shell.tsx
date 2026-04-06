@@ -57,6 +57,11 @@ export interface BottomSheetShellProps {
 
   /** 仅 `resizable={false}` 时使用，例如 `h-[55vh]` */
   heightClassName?: string;
+  /**
+   * 为 true 时关闭抽屉也不卸载 `SheetContent` 子树，保留内部 React 状态（如表单输入）。
+   * @default false
+   */
+  contentForceMount?: boolean;
 }
 
 /**
@@ -76,6 +81,7 @@ export function BottomSheetShell({
   minHeightPx = 120,
   maxHeightVh = 0.92,
   heightClassName,
+  contentForceMount = false,
 }: BottomSheetShellProps) {
   const fixedMode = resizable === false;
 
@@ -149,6 +155,7 @@ export function BottomSheetShell({
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent
         side="bottom"
+        forceMount={contentForceMount}
         className={cn(bottomSheetContentClassName, fixedMode && heightClassName, !fixedMode && "min-h-0", contentClassName)}
         style={sheetStyle}
         aria-describedby={undefined}

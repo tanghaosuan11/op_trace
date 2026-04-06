@@ -10,6 +10,7 @@ use crate::{
         tracer::storage_tracer::StorageTracer,
         tracer::gas_tracer::GasTracer,
         tracer::log_tracer::LogTracer,
+        tracer::patch_applier,
         // tracer::bytecode_tracer::BytecodeTracer,
     },
     optrace_journal::OpTraceJournal,
@@ -27,10 +28,11 @@ use revm_interpreter::{
     interpreter_types::{Jumps, MemoryTr},
     CallInput, CallScheme, CreateInputs, CreateOutcome, CreateScheme, 
 };
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use super::debug_session::{DebugSession, FrameRecord, StorageChangeRecord, TraceStep};
+use super::debug_session::{DebugSession, FrameRecord, FrameTerminalState, StorageChangeRecord, TraceStep};
 use super::fork::StatePatch;
 use super::message_encoder::MessageEncoder;
 use super::shadow::ShadowState;
@@ -45,6 +47,14 @@ struct StepInfo {
     step_count: usize,
     /// 执行前内存大小，用于检测 MLOAD 等导致的静默内存扩张
     memory_len_before: usize,
+}
+
+#[derive(Clone, Default)]
+struct PendingTerminalState {
+    pc: u32,
+    opcode: u8,
+    stack: Vec<U256>,
+    memory: Vec<u8>,
 }
 
 pub(crate) trait CallInputExt {
@@ -96,6 +106,8 @@ pub(crate) struct Cheatcodes<BlockT, TxT, CfgT> {
     global_step: usize,
     /// 当前执行的第几笔交易（0-based）；单 tx 为 0
     transaction_id: u32,
+    /// 每个 frame 的候选终态（在 step_end 捕获，call_end/create_end 落库）
+    pending_terminal_states: HashMap<(u32, u16), PendingTerminalState>,
 }
 
 impl<BlockT, TxT, CfgT> Cheatcodes<BlockT, TxT, CfgT> {
@@ -129,6 +141,7 @@ impl<BlockT, TxT, CfgT> Cheatcodes<BlockT, TxT, CfgT> {
             next_patch_idx: 0,
             global_step: 0,
             transaction_id: 0,
+            pending_terminal_states: HashMap::new(),
         }
     }
 
@@ -177,67 +190,6 @@ impl<BlockT, TxT, CfgT> Cheatcodes<BlockT, TxT, CfgT> {
         self.transaction_id = 0;
     }
 
-    fn apply_patches_for_current_step(
-        &mut self,
-        interp: &mut revm::interpreter::Interpreter<EthInterpreter>,
-    ) {
-        while self.next_patch_idx < self.patches.len()
-            && self.patches[self.next_patch_idx].step_index == self.global_step
-        {
-            let patch = &self.patches[self.next_patch_idx];
-            let opcode = interp.bytecode.opcode();
-            let op = OpCode::new(opcode).unwrap();
-            if self.patch_log_enabled {
-                println!(
-                    "[PatchTracer] ▶ patch hit: global_step={} step_index={} stack_patches={} mem_patches={} opcode={:?}",
-                    self.global_step,
-                    patch.step_index,
-                    patch.stack_patches.len(),
-                    patch.memory_patches.len(),
-                    op.as_str(),
-                );
-            }
-
-            for (pos, hex_val) in &patch.stack_patches {
-                let value =
-                    U256::from_str_radix(hex_val.trim_start_matches("0x"), 16).unwrap_or_default();
-                let data = interp.stack.data_mut();
-                let stack_len = data.len();
-                let idx = stack_len.saturating_sub(1).saturating_sub(*pos);
-                if idx < stack_len {
-                    data[idx] = value;
-                }
-            }
-
-            for (offset, hex_data) in &patch.memory_patches {
-                let bytes: Vec<u8> = hex_decode(hex_data);
-                if !bytes.is_empty() {
-                    let needed = offset + bytes.len();
-                    let aligned = needed.next_multiple_of(32);
-                    if interp.memory.len() < aligned {
-                        interp.memory.resize(aligned);
-                    }
-                    interp.memory.set(*offset, &bytes);
-                }
-            }
-
-            self.next_patch_idx += 1;
-        }
-    }
-
-}
-
-fn hex_decode(s: &str) -> Vec<u8> {
-    let s = s.trim_start_matches("0x");
-    let mut out = Vec::with_capacity(s.len() / 2);
-    let mut i = 0usize;
-    while i + 1 < s.len() {
-        if let Ok(v) = u8::from_str_radix(&s[i..i + 2], 16) {
-            out.push(v);
-        }
-        i += 2;
-    }
-    out
 }
 
 impl<BlockT, TxT, CfgT> Cheatcodes<BlockT, TxT, CfgT>
@@ -246,6 +198,59 @@ where
     TxT: Transaction + Clone,
     CfgT: Cfg + Clone,
 {
+    fn capture_terminal_candidate(
+        &mut self,
+        frame_id: u16,
+        pc: u32,
+        opcode: u8,
+        stack: &[U256],
+        memory: &[u8],
+    ) {
+        self.pending_terminal_states.insert(
+            (self.transaction_id, frame_id),
+            PendingTerminalState {
+                pc,
+                opcode,
+                stack: stack.to_vec(),
+                memory: memory.to_vec(),
+            },
+        );
+    }
+
+    fn write_terminal_state_on_frame_end(&mut self, frame_id: u16, frame_step_count: usize) {
+        let key = (self.transaction_id, frame_id);
+        let pending = self.pending_terminal_states.remove(&key);
+        let fallback = {
+            let session = self.debug_session.lock().unwrap();
+            session
+                .step_index
+                .get(&key)
+                .and_then(|idx| idx.last().copied())
+                .map(|global_idx| {
+                    let s = &session.trace[global_idx];
+                    let mem = session.compute_memory_at_step(self.transaction_id, frame_id, frame_step_count as u32);
+                    PendingTerminalState {
+                        pc: s.pc,
+                        opcode: s.opcode,
+                        stack: s.stack.clone(),
+                        memory: mem,
+                    }
+                })
+        };
+        if let Some(state) = pending.or(fallback) {
+            self.debug_session.lock().unwrap().set_terminal_state(
+                self.transaction_id,
+                frame_id,
+                FrameTerminalState {
+                    pc: state.pc,
+                    opcode: state.opcode,
+                    stack: state.stack,
+                    memory: state.memory,
+                },
+            );
+        }
+    }
+
     fn verify_memory(&self, interp: &revm::interpreter::Interpreter<EthInterpreter>) {
         let ctx_id = self.frame_manager.current_id();
         let frame_step = self.frame_manager.current_step_count() as u32;
@@ -481,7 +486,14 @@ where
     ) {
         // 时序约束：先应用 patch，再读取/记录 step 与 shadow。
         // 这样 shadow 看到的是“注入后、真实参与执行”的 EVM 数据。
-        self.apply_patches_for_current_step(interp);
+        patch_applier::apply_pending_patches_at_step(
+            &self.patches,
+            &mut self.next_patch_idx,
+            self.global_step,
+            self.patch_log_enabled,
+            interp,
+            context,
+        );
         let opcode = interp.bytecode.opcode();
         let op = OpCode::new(opcode).unwrap();
 
@@ -622,6 +634,18 @@ where
         if self.verify_memory {
             self.verify_memory(interp);
         }
+
+        // 记录可能导致 frame 退出的终结 opcode 的“执行后状态”，在 call_end/create_end 一次性落库。
+        if matches!(op, 0x00 | 0xf3 | 0xfd | 0xfe | 0xff) {
+            let mem_size = interp.memory.len();
+            self.capture_terminal_candidate(
+                self.frame_manager.current_id(),
+                self.step_info.pc as u32,
+                op as u8,
+                interp.stack.data(),
+                &interp.memory.slice(0..mem_size),
+            );
+        }
     }
 
     fn call(
@@ -732,6 +756,7 @@ where
             success,
             frame_step_count,
         );
+        self.write_terminal_state_on_frame_end(frame_id, frame_step_count);
 
         // Precompile 调用不会执行 RETURN/REVERT opcode，需要在此补一个父 frame 内存 patch
         // EVM 规范：is_ok_or_revert() 时将返回数据写入父 frame [retOffset, retOffset+min(retSize, outputLen))
@@ -862,6 +887,7 @@ where
             success,
             frame_step_count,
         );
+        self.write_terminal_state_on_frame_end(frame_id, frame_step_count);
 
         let deployed_addr = _outcome.address.unwrap_or(Address::ZERO);
         self.send_frame_update_address(deployed_addr);

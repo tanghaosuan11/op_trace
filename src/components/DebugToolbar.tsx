@@ -1,4 +1,5 @@
 import { useCallback, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { BottomSheetShell } from "@/components/ui/bottom-sheet-shell";
 import { Input } from "@/components/ui/input";
@@ -35,6 +36,11 @@ import {
 } from "lucide-react";
 import { frameScopeKeyFromFrame } from "@/lib/frameScope";
 import { useFloatingPanel } from "@/components/floating-panel";
+import { ipcCommands } from "@/lib/ipcConfig";
+import {
+  forkBalanceDecimalToWeiHex,
+  type ForkBalanceUnit,
+} from "@/lib/forkBalanceWei";
 
 interface DebugToolbarProps {
   onStepInto: () => void;
@@ -116,6 +122,7 @@ export function DebugToolbar({
   const txSlots = useDebugStore((s) => s.txSlots);
   const debugByTx = useDebugStore((s) => s.debugByTx);
   const rpcUrl = useDebugStore((s) => s.config.rpcUrl);
+  const sessionId = useDebugStore((s) => s.sessionId);
   const hasCallTree = useDebugStore((s) => s.callTreeNodes.length > 0);
   const isCallTreeOpen = useDebugStore((s) => s.isCallTreeOpen);
   const activeTab = useDebugStore((s) => s.activeTab);
@@ -130,15 +137,23 @@ export function DebugToolbar({
   const [patternCacheByFrame, setPatternCacheByFrame] = useState<Record<string, PatternCacheEntry>>({});
   const [showProgress, setShowProgress] = useState(true);
   const [toolsCollapsed, setToolsCollapsed] = useState(false);
-  const [forkAction, setForkAction] = useState<string | undefined>(undefined);
+  const [forkMenuOpen, setForkMenuOpen] = useState(false);
   const forkMode = useDebugStore((s) => s.config.forkMode);
   const isWhatIfMode = getWindowMode().mode === "whatif";
   const forkPatches = useForkStore((s) => s.patches);
   const [patchStep, setPatchStep] = useState("");
+  /** ForkConv：stack | memory | storage | value(ETH balance)；空字符串表示未选类型（PC 暂不开放） */
+  const [forkPatchKind, setForkPatchKind] = useState<string>("");
   const [patchStackPos, setPatchStackPos] = useState("");
   const [patchStackVal, setPatchStackVal] = useState("");
   const [patchMemOffset, setPatchMemOffset] = useState("");
   const [patchMemVal, setPatchMemVal] = useState("");
+  const [patchStorageAddr, setPatchStorageAddr] = useState("");
+  const [patchStorageSlot, setPatchStorageSlot] = useState("");
+  const [patchStorageVal, setPatchStorageVal] = useState("");
+  const [patchValueAddr, setPatchValueAddr] = useState("");
+  const [patchTxValue, setPatchTxValue] = useState("");
+  const [patchBalanceUnit, setPatchBalanceUnit] = useState<ForkBalanceUnit>("eth");
   const [diagnosticsDialogOpen, setDiagnosticsDialogOpen] = useState(false);
   const activePatternResults = patternCacheByFrame[activeFrameKey]?.result ?? null;
   const hasSession = stepCount > 0;
@@ -296,22 +311,45 @@ export function DebugToolbar({
       {forkMode && (
         <>
           <div className="w-px h-6 bg-border mx-0.5" />
-          <Select
-            value={forkAction}
-            onValueChange={(v) => {
-              setForkAction(v);
-              openFork(v === "inherit");
-              setTimeout(() => setForkAction(undefined), 0);
-            }}
-          >
-            <SelectTrigger className="h-6 w-[60px] px-2 text-[11px]" title="Open fork/whatif window">
-              <SelectValue placeholder="Fork" />
-            </SelectTrigger>
-            <SelectContent className="w-[60px] min-w-0 p-1 text-[11px]">
-              <SelectItem value="blank" className="h-6 pl-1.5 pr-0.5 text-[11px]">Blank</SelectItem>
-              <SelectItem value="inherit" className="h-6 pl-1.5 pr-0.5 text-[11px]">Inheirt</SelectItem>
-            </SelectContent>
-          </Select>
+          <Popover open={forkMenuOpen} onOpenChange={setForkMenuOpen}>
+            <PopoverTrigger asChild>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 w-[60px] px-2 text-[11px]"
+                title="Open fork/whatif window"
+              >
+                Fork
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent
+              className="w-auto border-0 p-0.5 shadow-md"
+              align="start"
+            >
+              <div className="flex flex-col">
+                <Button
+                  variant="ghost"
+                  className="h-7 justify-start rounded-sm px-2 text-[11px] font-normal shadow-none focus-visible:ring-0"
+                  onClick={() => {
+                    setForkMenuOpen(false);
+                    openFork(false);
+                  }}
+                >
+                  Blank
+                </Button>
+                <Button
+                  variant="ghost"
+                  className="h-7 justify-start rounded-sm px-2 text-[11px] font-normal shadow-none focus-visible:ring-0"
+                  onClick={() => {
+                    setForkMenuOpen(false);
+                    openFork(true);
+                  }}
+                >
+                  Inherit
+                </Button>
+              </div>
+            </PopoverContent>
+          </Popover>
         </>
       )}
 
@@ -602,61 +640,246 @@ export function DebugToolbar({
       {showFork && forkMode && isWhatIfMode && (
         <div className="flex flex-col border-b bg-muted/30">
           <div className="flex items-center gap-1.5 px-2 py-1 flex-wrap">
-            <span className="text-xs text-muted-foreground shrink-0">Patch:</span>
+            <span className="text-xs text-muted-foreground shrink-0">ForkConv</span>
             <Input
               className="h-6 text-xs w-24"
-              placeholder="step"
+              placeholder="step (1-based)"
               value={patchStep}
               onChange={(e) => setPatchStep(e.target.value)}
             />
-            <Input
-              className="h-6 text-xs w-20"
-              placeholder="stack pos"
-              value={patchStackPos}
-              onChange={(e) => setPatchStackPos(e.target.value)}
-            />
-            <Input
-              className="h-6 text-xs w-56"
-              placeholder="stack value (0x...)"
-              value={patchStackVal}
-              onChange={(e) => setPatchStackVal(e.target.value)}
-            />
-            <Input
-              className="h-6 text-xs w-24"
-              placeholder="mem offset"
-              value={patchMemOffset}
-              onChange={(e) => setPatchMemOffset(e.target.value)}
-            />
-            <Input
-              className="h-6 text-xs w-56"
-              placeholder="mem data (0x...)"
-              value={patchMemVal}
-              onChange={(e) => setPatchMemVal(e.target.value)}
-            />
-            <Button size="sm" className="h-6 px-2 text-xs" onClick={() => {
+            <Select
+              value={forkPatchKind || undefined}
+              onValueChange={(v) => setForkPatchKind(v)}
+            >
+              <SelectTrigger className="h-6 w-[100px] px-2 text-[11px]" title="Patch kind">
+                <SelectValue placeholder="Kind" />
+              </SelectTrigger>
+              <SelectContent className="min-w-[100px] p-1 text-[11px]">
+                <SelectItem value="stack" className="h-6 text-[11px]">Stack</SelectItem>
+                <SelectItem value="memory" className="h-6 text-[11px]">Memory</SelectItem>
+                <SelectItem value="storage" className="h-6 text-[11px]">Storage</SelectItem>
+                <SelectItem value="value" className="h-6 text-[11px]">Balance</SelectItem>
+              </SelectContent>
+            </Select>
+
+            {forkPatchKind === "stack" && (
+              <>
+                <Input
+                  className="h-6 text-xs w-20"
+                  placeholder="stack pos"
+                  title="0 = stack top"
+                  value={patchStackPos}
+                  onChange={(e) => setPatchStackPos(e.target.value)}
+                />
+                <span className="text-[10px] text-muted-foreground shrink-0 max-w-[7rem] leading-tight" title="0 = stack top">
+                  0 = stack top
+                </span>
+                <Input
+                  className="h-6 text-xs min-w-[12rem] flex-1 max-w-md"
+                  placeholder="value (0x...)"
+                  value={patchStackVal}
+                  onChange={(e) => setPatchStackVal(e.target.value)}
+                />
+              </>
+            )}
+            {forkPatchKind === "memory" && (
+              <>
+                <Input
+                  className="h-6 text-xs w-24"
+                  placeholder="mem offset"
+                  value={patchMemOffset}
+                  onChange={(e) => setPatchMemOffset(e.target.value)}
+                />
+                <Input
+                  className="h-6 text-xs min-w-[12rem] flex-1 max-w-md"
+                  placeholder="data (0x...)"
+                  value={patchMemVal}
+                  onChange={(e) => setPatchMemVal(e.target.value)}
+                />
+              </>
+            )}
+            {forkPatchKind === "storage" && (
+              <>
+                <Input
+                  className="h-6 text-xs w-36 font-mono"
+                  placeholder="address (0x...)"
+                  value={patchStorageAddr}
+                  onChange={(e) => setPatchStorageAddr(e.target.value)}
+                />
+                <Input
+                  className="h-6 text-xs w-32 font-mono"
+                  placeholder="slot (0x...)"
+                  value={patchStorageSlot}
+                  onChange={(e) => setPatchStorageSlot(e.target.value)}
+                />
+                <Input
+                  className="h-6 text-xs min-w-[10rem] flex-1 max-w-md font-mono"
+                  placeholder="value (0x...)"
+                  value={patchStorageVal}
+                  onChange={(e) => setPatchStorageVal(e.target.value)}
+                />
+              </>
+            )}
+            {forkPatchKind === "value" && (
+              <>
+                <Input
+                  className="h-6 text-xs flex-1 min-w-[6rem] max-w-[18rem] font-mono"
+                  placeholder="address (0x...)"
+                  value={patchValueAddr}
+                  onChange={(e) => setPatchValueAddr(e.target.value)}
+                />
+                <div className="flex shrink-0 items-center gap-0.5">
+                  <Input
+                    className="h-6 w-[5.25rem] text-xs px-1.5 tabular-nums"
+                    placeholder="amount"
+                    title="Decimal amount; converted to wei when adding"
+                    value={patchTxValue}
+                    onChange={(e) => setPatchTxValue(e.target.value)}
+                  />
+                  <Select
+                    value={patchBalanceUnit}
+                    onValueChange={(v) => setPatchBalanceUnit(v as ForkBalanceUnit)}
+                  >
+                    <SelectTrigger className="h-6 w-[4.25rem] px-1 text-[11px]" title="Unit (converted to wei)">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent className="min-w-[4.25rem] p-1 text-[11px]">
+                      <SelectItem value="wei" className="h-6 text-[11px]">Wei</SelectItem>
+                      <SelectItem value="gwei" className="h-6 text-[11px]">GWei</SelectItem>
+                      <SelectItem value="eth" className="h-6 text-[11px]">ETH</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </>
+            )}
+
+            <Button size="sm" className="h-6 px-2 text-xs" onClick={() => void (async () => {
+              if (!forkPatchKind) {
+                toast.error("Select a patch kind first");
+                return;
+              }
               const stepIdx = parseInt(patchStep, 10);
-              if (isNaN(stepIdx) || stepIdx < 1) { toast.error("Invalid step (1-based)"); return; }
+              if (isNaN(stepIdx) || stepIdx < 1) {
+                toast.error("Invalid step (1-based)");
+                return;
+              }
+              const stepIndex0 = stepIdx - 1;
+
+              const sid = sessionId?.trim();
+              if (!sid) {
+                toast.error("No debug session — run a trace first to validate");
+                return;
+              }
+
               const stackPatches: { pos: number; value: string }[] = [];
               const memoryPatches: { offset: number; value: string }[] = [];
-              if (patchStackPos.trim() && patchStackVal.trim()) {
-                const pos = parseInt(patchStackPos, 10);
-                if (isNaN(pos) || pos < 0) { toast.error("Invalid stack position"); return; }
-                stackPatches.push({ pos, value: patchStackVal.trim() });
+              const storagePatches: { address: string; slot: string; value: string }[] = [];
+              const balancePatches: { address: string; value: string }[] = [];
+
+              try {
+                if (forkPatchKind === "value") {
+                  if (!patchValueAddr.trim() || !patchTxValue.trim()) {
+                    toast.error("Enter address and balance amount");
+                    return;
+                  }
+                  let valueWeiHex: string;
+                  try {
+                    valueWeiHex = forkBalanceDecimalToWeiHex(patchTxValue, patchBalanceUnit);
+                  } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    toast.error(msg || "Invalid amount");
+                    return;
+                  }
+                  await invoke(ipcCommands.validateForkPatch, {
+                    sessionId: sid,
+                    stepIndex: stepIndex0,
+                    kind: "value",
+                    balanceAddressHex: patchValueAddr.trim(),
+                    valueHex: valueWeiHex,
+                  });
+                  balancePatches.push({
+                    address: patchValueAddr.trim(),
+                    value: valueWeiHex,
+                  });
+                }
+
+                if (forkPatchKind === "stack") {
+                  if (!patchStackPos.trim() || !patchStackVal.trim()) {
+                    toast.error("Enter stack position and value");
+                    return;
+                  }
+                  const pos = parseInt(patchStackPos, 10);
+                  if (isNaN(pos) || pos < 0) {
+                    toast.error("Invalid stack position");
+                    return;
+                  }
+                  await invoke(ipcCommands.validateForkPatch, {
+                    sessionId: sid,
+                    stepIndex: stepIndex0,
+                    kind: "stack",
+                    stackPos: pos,
+                  });
+                  stackPatches.push({ pos, value: patchStackVal.trim() });
+                }
+
+                if (forkPatchKind === "memory") {
+                  if (!patchMemOffset.trim() || !patchMemVal.trim()) {
+                    toast.error("Enter memory offset and data");
+                    return;
+                  }
+                  const offset = parseInt(patchMemOffset, 10);
+                  if (isNaN(offset) || offset < 0) {
+                    toast.error("Invalid memory offset");
+                    return;
+                  }
+                  await invoke(ipcCommands.validateForkPatch, {
+                    sessionId: sid,
+                    stepIndex: stepIndex0,
+                    kind: "memory",
+                    memOffset: offset,
+                    memHex: patchMemVal.trim(),
+                  });
+                  memoryPatches.push({ offset, value: patchMemVal.trim() });
+                }
+
+                if (forkPatchKind === "storage") {
+                  if (!patchStorageAddr.trim() || !patchStorageSlot.trim() || !patchStorageVal.trim()) {
+                    toast.error("Enter storage address, slot, and value");
+                    return;
+                  }
+                  await invoke(ipcCommands.validateForkPatch, {
+                    sessionId: sid,
+                    stepIndex: stepIndex0,
+                    kind: "storage",
+                    storageAddressHex: patchStorageAddr.trim(),
+                    storageSlotHex: patchStorageSlot.trim(),
+                    storageValueHex: patchStorageVal.trim(),
+                  });
+                  storagePatches.push({
+                    address: patchStorageAddr.trim(),
+                    slot: patchStorageSlot.trim(),
+                    value: patchStorageVal.trim(),
+                  });
+                }
+
+                useForkStore.getState().addPatch({
+                  id: crypto.randomUUID(),
+                  stepIndex: stepIndex0,
+                  stackPatches,
+                  memoryPatches,
+                  storagePatches,
+                  balancePatches,
+                });
+                setForkPatchKind("");
+                setPatchStackPos(""); setPatchStackVal(""); setPatchMemOffset(""); setPatchMemVal("");
+                setPatchStorageAddr(""); setPatchStorageSlot(""); setPatchStorageVal("");
+                setPatchValueAddr(""); setPatchTxValue("");
+                setPatchBalanceUnit("eth");
+              } catch (e) {
+                const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
+                toast.error(msg);
               }
-              if (patchMemOffset.trim() && patchMemVal.trim()) {
-                const offset = parseInt(patchMemOffset, 10);
-                if (isNaN(offset) || offset < 0) { toast.error("Invalid memory offset"); return; }
-                memoryPatches.push({ offset, value: patchMemVal.trim() });
-              }
-              if (stackPatches.length === 0 && memoryPatches.length === 0) { toast.error("At least one stack or memory patch required"); return; }
-              useForkStore.getState().addPatch({
-                id: crypto.randomUUID(),
-                stepIndex: stepIdx - 1,
-                stackPatches,
-                memoryPatches,
-              });
-              setPatchStep(""); setPatchStackPos(""); setPatchStackVal(""); setPatchMemOffset(""); setPatchMemVal("");
-            }}>
+            })()}>
               + Add
             </Button>
             <Button size="sm" variant="outline" className="h-6 px-2 text-xs bg-white hover:bg-gray-50 text-black" onClick={() => onStartDebug?.()} title="Rerun">
@@ -672,6 +895,8 @@ export function DebugToolbar({
                       #{i + 1} s={p.stepIndex + 1}
                       {p.stackPatches.length > 0 && ` k${p.stackPatches.length}`}
                       {p.memoryPatches.length > 0 && ` m${p.memoryPatches.length}`}
+                      {(p.storagePatches?.length ?? 0) > 0 && ` st${p.storagePatches?.length ?? 0}`}
+                      {(p.balancePatches?.length ?? 0) > 0 && ` b${p.balancePatches?.length ?? 0}`}
                       {i === forkPatches.length - 1 && (
                         <button
                           className="ml-1 text-muted-foreground hover:text-destructive leading-none"
@@ -700,6 +925,26 @@ export function DebugToolbar({
                           <div className="font-semibold mb-0.5">Memory Patches:</div>
                           {p.memoryPatches.map((mp, idx) => (
                             <div key={idx} className="ml-2 text-muted-foreground font-mono text-[10px] break-all">offset {mp.offset}: {mp.value}</div>
+                          ))}
+                        </div>
+                      )}
+                      {(p.storagePatches?.length ?? 0) > 0 && (
+                        <div>
+                          <div className="font-semibold mb-0.5">Storage Patches:</div>
+                          {(p.storagePatches ?? []).map((sp, idx) => (
+                            <div key={idx} className="ml-2 text-muted-foreground font-mono text-[10px] break-all">
+                              {sp.address} · slot {sp.slot} → {sp.value}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {(p.balancePatches?.length ?? 0) > 0 && (
+                        <div>
+                          <div className="font-semibold mb-0.5">Balance Patches (wei, hex):</div>
+                          {(p.balancePatches ?? []).map((bp, idx) => (
+                            <div key={idx} className="ml-2 text-muted-foreground font-mono text-[10px] break-all">
+                              {bp.address} → {bp.value}
+                            </div>
                           ))}
                         </div>
                       )}

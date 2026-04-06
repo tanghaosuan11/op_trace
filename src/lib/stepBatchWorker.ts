@@ -45,7 +45,7 @@ workerScope.onmessage = (event: MessageEvent<ParseRequest>) => {
     parseMs,
     indexBuildMs,
   };
-  // compact.buffer 零复制 transfer，主线程接收时无需反序列化
+  // compact.buffer 零复制 transfer
   workerScope.postMessage(response, [compact.buffer]);
 };
 

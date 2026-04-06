@@ -188,6 +188,14 @@ export interface UISlice {
     parent_ids: number[];
     stack_value_post?: string;
   }>;
+  /** 自定义步数播放：全局 trace 下标列表 */
+  stepPlaybackQueue: number[];
+  /** 当前在队列中的位置（0..length-1） */
+  stepPlaybackCursor: number;
+  /** 底部浮动播放条是否显示（仅能通过条上关闭钮关闭） */
+  isStepPlaybackBarVisible: boolean;
+  /** 步数队列是否处于自动按间隔前进 */
+  isStepPlaybackAutoPlaying: boolean;
 }
 
 const initialUI: UISlice = {
@@ -212,6 +220,10 @@ const initialUI: UISlice = {
   isDataFlowModalOpen: false,
   dataFlowTreeRootId: 0,
   dataFlowTreeNodes: [],
+  stepPlaybackQueue: [],
+  stepPlaybackCursor: 0,
+  isStepPlaybackBarVisible: false,
+  isStepPlaybackAutoPlaying: false,
 };
 
 // Slice 3b: app config

@@ -1,31 +1,34 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   keccak256, toBytes, isHex, isAddress, getAddress,
   pad, concat,
-  decodeFunctionData, decodeAbiParameters,
-  parseAbiParameters, parseAbi,
+  parseAbiItem,
+  encodeFunctionData,
+  decodeFunctionData,
+  toFunctionSelector,
   formatUnits, parseUnits,
   createPublicClient, http,
 } from "viem";
+import type { Abi, AbiFunction, AbiParameter } from "viem";
 import { BottomSheetShell } from "@/components/ui/bottom-sheet-shell";
 import { SheetClose } from "@/components/ui/sheet";
-import { X, Pin, PinOff, Wrench } from "lucide-react";
+import { X, Pin, PinOff, Wrench, Copy, Eye, PenLine, Code } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useDebugStore } from "@/store/debugStore";
 import { useDrawerActions } from "@/hooks/useDrawerActions";
 import { getSelectedRpc } from "@/lib/rpcConfig";
 
-type Tool = "conv" | "keccak256" | "4byte" | "checksum" | "abi" | "slot";
+type Tool = "conv" | "hash4byte" | "checksum" | "abi" | "slot";
 
 const TOOLS: { id: Tool; label: string }[] = [
-  { id: "conv",      label: "Conv"      },
-  { id: "keccak256", label: "Keccak256" },
-  { id: "4byte",     label: "4Byte"     },
-  { id: "checksum",  label: "Checksum"  },
-  { id: "abi",       label: "ABI"       },
-  { id: "slot",      label: "SlotRead"  },
+  { id: "conv",      label: "Conv"       },
+  { id: "hash4byte", label: "Keccak·4byte" },
+  // { id: "checksum",  label: "Checksum"  },
+  { id: "abi",       label: "ABI Encode" },
+  { id: "slot",      label: "SlotRead"   },
 ];
 
 function parseNumber(val: string): bigint | null {
@@ -179,6 +182,21 @@ function Keccak256Tool() {
   );
 }
 
+function KeccakFourByteTool() {
+  return (
+    <div className="grid min-h-0 grid-cols-1 gap-2 divide-y divide-border sm:grid-cols-2 sm:divide-x sm:divide-y-0">
+      <div className="min-w-0 space-y-1.5 pb-2 sm:pb-0 sm:pr-2">
+        <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Keccak256</p>
+        <Keccak256Tool />
+      </div>
+      <div className="min-w-0 space-y-1.5 pt-2 sm:pt-0 sm:pl-2">
+        <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">4byte.directory</p>
+        <FourByteTool />
+      </div>
+    </div>
+  );
+}
+
 function FourByteTool() {
   const [input, setInput] = useState("");
   const [results, setResults] = useState<string[]>([]);
@@ -204,7 +222,7 @@ function FourByteTool() {
         <Input placeholder="a9059cbb  or  0xa9059cbb" value={input}
           onChange={(e) => { setInput(e.target.value); setError(""); setResults([]); }}
           className="font-mono h-7 text-xs flex-1"
-          onKeyDown={(e) => e.key === "Enter" && handleLookup()} autoFocus />
+          onKeyDown={(e) => e.key === "Enter" && handleLookup()} />
         <Button size="sm" className="h-7 px-3 text-xs" onClick={handleLookup} disabled={loading}>
           {loading ? "..." : "Lookup"}
         </Button>
@@ -244,47 +262,616 @@ function ChecksumTool() {
   );
 }
 
-function AbiTool() {
-  const [sig, setSig] = useState("");
-  const [data, setData] = useState("");
-  const [result, setResult] = useState("");
-  const [error, setError] = useState("");
-  const run = () => {
-    setError(""); setResult("");
-    const d = data.trim(); if (!d || !isHex(d)) { setError("Need hex data"); return; }
+/** Parse one argument from UI string according to Solidity ABI type (scalar, tuple, array → JSON). */
+function parseAbiArgValue(raw: string, param: AbiParameter): unknown {
+  const v = raw.trim();
+  const t = param.type;
+  const label = param.name ? `${param.name} (${t})` : t;
+
+  if (t === "tuple" || t.startsWith("tuple(")) {
+    if (!v) throw new Error(`${label}: empty — use JSON for tuple`);
+    return JSON.parse(v);
+  }
+  if (t.includes("[") && t.includes("]")) {
+    if (!v) throw new Error(`${label}: empty — use JSON array`);
+    return JSON.parse(v);
+  }
+  if (t === "address") {
+    if (!isAddress(v)) throw new Error(`${label}: invalid address`);
+    return getAddress(v);
+  }
+  if (t === "bool") {
+    const l = v.toLowerCase();
+    if (l === "true" || l === "1") return true;
+    if (l === "false" || l === "0") return false;
+    throw new Error(`${label}: use true, false, 1, or 0`);
+  }
+  if (t.startsWith("uint") && /^uint[0-9]+$/.test(t)) {
     try {
-      if (sig.trim() && d.length >= 10) {
-        const fnSig = sig.trim();
-        const abiItem = `function ${fnSig}` as const;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const abi = parseAbi([abiItem as any]);
-        const decoded = decodeFunctionData({ abi, data: d as `0x${string}` });
-        setResult(JSON.stringify(decoded.args, (_k, v) => typeof v === "bigint" ? v.toString() : v, 2));
-      } else {
-        const params = sig.trim() ? parseAbiParameters(sig.trim()) : parseAbiParameters("bytes");
-        const decoded = decodeAbiParameters(params, d as `0x${string}`);
-        setResult(JSON.stringify(decoded, (_k, v) => typeof v === "bigint" ? v.toString() : v, 2));
+      return BigInt(v);
+    } catch {
+      throw new Error(`${label}: invalid integer (decimal or 0x hex)`);
+    }
+  }
+  if (t.startsWith("int") && /^int[0-9]+$/.test(t)) {
+    try {
+      return BigInt(v);
+    } catch {
+      throw new Error(`${label}: invalid integer (decimal or 0x hex)`);
+    }
+  }
+  if (t === "bytes") {
+    if (!isHex(v)) throw new Error(`${label}: dynamic bytes — hex string`);
+    return v as `0x${string}`;
+  }
+  {
+    const m = /^bytes([1-9]|[12][0-9]|32)$/.exec(t);
+    if (m) {
+      if (!isHex(v)) throw new Error(`${label}: fixed bytes — hex`);
+      const want = parseInt(m[1], 10);
+      const got = (v.length - 2) / 2;
+      if (got !== want) throw new Error(`${label}: need exactly ${want} bytes (${want * 2} hex chars)`);
+      return v as `0x${string}`;
+    }
+  }
+  if (t === "string") return v;
+  throw new Error(`${label}: unsupported type — use JSON for complex types`);
+}
+
+function formatFunctionLabel(fn: AbiFunction, selector: string): string {
+  const sig = `${fn.name}(${fn.inputs.map((i) => i.type).join(",")})`;
+  const short = sig.length > 42 ? `${sig.slice(0, 40)}…` : sig;
+  return `${selector.slice(0, 10)}  ${short}`;
+}
+
+/** view/pure (eth_call); nonpayable/payable = write */
+function isAbiFunctionRead(fn: AbiFunction): boolean {
+  const m = fn.stateMutability;
+  if (m === "view" || m === "pure") return true;
+  if (m === "nonpayable" || m === "payable") return false;
+  const legacy = fn as AbiFunction & { constant?: boolean };
+  if (legacy.constant === true) return true;
+  return false;
+}
+
+function AbiTool() {
+  const [abiText, setAbiText] = useState("");
+  const [abi, setAbi] = useState<Abi | null>(null);
+  const [leftError, setLeftError] = useState("");
+
+  const [abiOpMode, setAbiOpMode] = useState<"encode" | "decode">("encode");
+  const [fetchEnabled, setFetchEnabled] = useState(false);
+  const [fetchAddress, setFetchAddress] = useState("");
+  const [fetchLoading, setFetchLoading] = useState(false);
+  const [fetchError, setFetchError] = useState("");
+  const [fetchResult, setFetchResult] = useState("");
+
+  const [fnSelect, setFnSelect] = useState("custom");
+  const [customSig, setCustomSig] = useState("");
+  const [argValues, setArgValues] = useState<string[]>([]);
+  const [argErrors, setArgErrors] = useState<string[]>([]);
+
+  const [decodeCalldata, setDecodeCalldata] = useState("");
+  const [decodeResult, setDecodeResult] = useState("");
+  const [decodeError, setDecodeError] = useState("");
+
+  const [encoded, setEncoded] = useState("");
+  const [encodeError, setEncodeError] = useState("");
+
+  const functions = abi ? abi.filter((x): x is AbiFunction => x.type === "function") : [];
+
+  const currentFunction = ((): AbiFunction | null => {
+    if (fnSelect === "custom") {
+      const s = customSig.trim();
+      if (!s) return null;
+      try {
+        const item = parseAbiItem(`function ${s}`);
+        return item.type === "function" ? item : null;
+      } catch {
+        return null;
       }
-    } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    }
+    const m = /^fn-(\d+)$/.exec(fnSelect);
+    if (!m || !abi) return null;
+    const i = parseInt(m[1], 10);
+    return functions[i] ?? null;
+  })();
+
+  const params = currentFunction?.inputs ?? [];
+
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      const raw = abiText.trim();
+    setEncoded("");
+    setDecodeResult("");
+    setFetchResult("");
+    if (!raw) {
+        setAbi(null);
+        setLeftError("");
+        return;
+      }
+      try {
+        const json = JSON.parse(raw) as unknown;
+        if (!Array.isArray(json)) {
+          setLeftError("ABI must be a JSON array");
+          setAbi(null);
+          setFnSelect("custom");
+          return;
+        }
+        const parsed = json as Abi;
+        setAbi(parsed);
+        setLeftError("");
+        const fns = parsed.filter((x): x is AbiFunction => x.type === "function");
+        setFnSelect((prev) => {
+          if (prev === "custom") return "custom";
+          const m = /^fn-(\d+)$/.exec(prev);
+          if (m) {
+            const i = parseInt(m[1], 10);
+            if (i < fns.length) return prev;
+          }
+          return fns.length > 0 ? "fn-0" : "custom";
+        });
+      } catch (e) {
+        setAbi(null);
+        setLeftError(e instanceof Error ? e.message : String(e));
+        setFnSelect("custom");
+      }
+    }, 400);
+    return () => window.clearTimeout(t);
+  }, [abiText]);
+
+  const setArgAt = (i: number, val: string) => {
+    setArgValues((prev) => {
+      const next = [...prev];
+      next[i] = val;
+      return next;
+    });
+    setArgErrors((prev) => {
+      const next = [...prev];
+      next[i] = "";
+      return next;
+    });
+    setEncoded("");
+    setEncodeError("");
+    setDecodeResult("");
+    setDecodeError("");
+    setFetchResult("");
+    setFetchError("");
   };
+
+  const paramCount = params.length;
+
+  useEffect(() => {
+    setArgValues((prev) => Array.from({ length: paramCount }, (_, i) => prev[i] ?? ""));
+    setArgErrors(Array.from({ length: paramCount }, () => ""));
+  }, [paramCount]);
+
+  const collectEncodeArgs = (fn: AbiFunction): { ok: true; args: unknown[] } | { ok: false; errs: string[] } => {
+    const n = fn.inputs.length;
+    const errs: string[] = Array(n).fill("");
+    const args: unknown[] = [];
+    for (let i = 0; i < n; i++) {
+      const p = fn.inputs[i];
+      const raw = argValues[i] ?? "";
+      try {
+        args.push(parseAbiArgValue(raw, p));
+      } catch (e) {
+        errs[i] = e instanceof Error ? e.message : String(e);
+      }
+    }
+    if (errs.some((e) => e)) return { ok: false, errs };
+    return { ok: true, args };
+  };
+
+  const runEncode = () => {
+    setEncodeError("");
+    setEncoded("");
+    const fn = currentFunction;
+    if (!fn) {
+      setEncodeError(fnSelect === "custom" ? "Enter a valid function signature" : "Select a function");
+      return;
+    }
+    const collected = collectEncodeArgs(fn);
+    if (!collected.ok) {
+      setArgErrors(collected.errs);
+      setEncodeError("Fix argument errors");
+      return;
+    }
+    try {
+      let data: `0x${string}`;
+      if (fnSelect === "custom") {
+        data = encodeFunctionData({ abi: [fn], functionName: fn.name, args: collected.args as never });
+      } else {
+        if (!abi) {
+          setEncodeError("Paste a valid JSON ABI or use custom");
+          return;
+        }
+        data = encodeFunctionData({ abi, functionName: fn.name, args: collected.args as never });
+      }
+      setEncoded(data);
+      setArgErrors(Array(paramCount).fill(""));
+    } catch (e) {
+      setEncodeError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const runFetch = async () => {
+    setFetchError("");
+    setFetchResult("");
+    const fn = currentFunction;
+    if (!fn) {
+      setFetchError(fnSelect === "custom" ? "Enter a valid function signature" : "Select a function");
+      return;
+    }
+    if (!isAbiFunctionRead(fn)) {
+      window.alert(
+        "Only view/pure (read) functions can be fetched on-chain. This function is a write (nonpayable/payable).",
+      );
+      return;
+    }
+    const collected = collectEncodeArgs(fn);
+    if (!collected.ok) {
+      setArgErrors(collected.errs);
+      setFetchError("Fix argument errors");
+      return;
+    }
+    const addr = fetchAddress.trim();
+    if (!addr) {
+      setFetchError("Enter contract address");
+      return;
+    }
+    if (!isAddress(addr)) {
+      setFetchError("Invalid contract address");
+      return;
+    }
+    const abiForRead = fnSelect === "custom" ? [fn] : abi;
+    if (!abiForRead) {
+      setFetchError("Paste a valid JSON ABI or use custom");
+      return;
+    }
+    setFetchLoading(true);
+    try {
+      const client = createPublicClient({ transport: http(getSelectedRpc()) });
+      const result = await client.readContract({
+        address: getAddress(addr),
+        abi: abiForRead,
+        functionName: fn.name,
+        args: collected.args as never,
+      });
+      setFetchResult(
+        JSON.stringify(result, (_k, v) => (typeof v === "bigint" ? v.toString() : v), 2),
+      );
+      setArgErrors(Array(paramCount).fill(""));
+    } catch (e) {
+      setFetchError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setFetchLoading(false);
+    }
+  };
+
+  const runDecode = () => {
+    setDecodeError("");
+    setDecodeResult("");
+    const fn = currentFunction;
+    if (!fn) {
+      setDecodeError(fnSelect === "custom" ? "Enter a valid function signature" : "Select a function from ABI");
+      return;
+    }
+    const raw = decodeCalldata.trim();
+    if (!raw) {
+      setDecodeError("Paste calldata hex");
+      return;
+    }
+    const normalized = raw.startsWith("0x") || raw.startsWith("0X") ? raw : `0x${raw}`;
+    if (!isHex(normalized)) {
+      setDecodeError("Calldata must be hex");
+      return;
+    }
+    const data = normalized as `0x${string}`;
+    if (data.length < 10) {
+      setDecodeError("Calldata too short (need selector + body)");
+      return;
+    }
+    let expected: string;
+    try {
+      expected = toFunctionSelector(fn).toLowerCase();
+    } catch (e) {
+      setDecodeError(e instanceof Error ? e.message : String(e));
+      return;
+    }
+    const actual = data.slice(0, 10).toLowerCase();
+    if (actual !== expected) {
+      setDecodeError(
+        `4-byte selector mismatch: expected ${expected}, got ${actual} (calldata does not match this function)`,
+      );
+      return;
+    }
+    try {
+      const dec =
+        fnSelect === "custom"
+          ? decodeFunctionData({ abi: [fn], data })
+          : decodeFunctionData({ abi: abi!, data });
+      if (dec.functionName !== fn.name) {
+        setDecodeError(
+          `Decoded function "${dec.functionName}" does not match selected "${fn.name}"`,
+        );
+        return;
+      }
+      setDecodeResult(
+        JSON.stringify(
+          { functionName: dec.functionName, args: dec.args },
+          (_k, v) => (typeof v === "bigint" ? v.toString() : v),
+          2,
+        ),
+      );
+    } catch (e) {
+      setDecodeError(
+        `Decode failed (payload may not match ABI types): ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  };
+
   return (
-    <div className="space-y-2">
-      <Input placeholder="transfer(address,uint256)  or  address,uint256  (leave empty = raw)" value={sig}
-        onChange={(e) => { setSig(e.target.value); setResult(""); setError(""); }}
-        className="font-mono h-7 text-xs" autoFocus />
-      <div className="flex gap-2">
-        <Input placeholder="0x calldata hex..." value={data}
-          onChange={(e) => { setData(e.target.value); setResult(""); setError(""); }}
-          className="font-mono h-7 text-xs flex-1"
-          onKeyDown={(e) => e.key === "Enter" && run()} />
-        <Button size="sm" className="h-7 px-3 text-xs shrink-0" onClick={run}>Decode</Button>
+    <div className="grid min-h-0 w-full flex-1 grid-cols-1 grid-rows-[minmax(0,1fr)_auto] gap-2 divide-y divide-border sm:grid-cols-2 sm:grid-rows-1 sm:divide-x sm:divide-y-0">
+      <div className="flex min-h-0 flex-col gap-1.5 pb-2 sm:pb-0 sm:pr-2">
+        <p className="shrink-0 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Contract ABI (JSON)</p>
+        <Textarea
+          value={abiText}
+          onChange={(e) => setAbiText(e.target.value)}
+          placeholder='[{"type":"function","name":"transfer",...}]'
+          className="min-h-0 flex-1 resize-none font-mono text-xs"
+          spellCheck={false}
+        />
+        {leftError && <Err msg={leftError} />}
+        {abi && !leftError && (
+          <p className="shrink-0 text-[10px] text-muted-foreground">
+            {functions.length} function(s) — selectors in the list →
+          </p>
+        )}
       </div>
-      {error && <Err msg={error} />}
-      {result && (
-        <pre className="text-xs font-mono bg-muted rounded px-2 py-1 overflow-auto max-h-[80px] select-all whitespace-pre-wrap break-all">{result}</pre>
-      )}
+
+      <div className="flex min-h-0 flex-col gap-1.5 overflow-y-auto pt-2 sm:pt-0 sm:pl-2">
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+            {abiOpMode === "encode" ? "Encode calldata" : "Decode calldata"}
+          </p>
+          <div className="flex shrink-0 items-center gap-3">
+            {abiOpMode === "encode" && (
+              <label className="flex cursor-pointer items-center gap-1 select-none">
+                <input
+                  type="checkbox"
+                  checked={fetchEnabled}
+                  onChange={(e) => {
+                    setFetchEnabled(e.target.checked);
+                    setFetchResult("");
+                    setFetchError("");
+                  }}
+                  className="h-3 w-3 accent-primary"
+                />
+                <span className="text-[11px] text-muted-foreground">Fetch</span>
+              </label>
+            )}
+            <label className="flex cursor-pointer items-center gap-1 select-none">
+              <input
+                type="checkbox"
+                checked={abiOpMode === "decode"}
+                onChange={(e) => {
+                  const decode = e.target.checked;
+                  setAbiOpMode(decode ? "decode" : "encode");
+                  setEncoded("");
+                  setEncodeError("");
+                  setDecodeResult("");
+                  setDecodeError("");
+                  if (decode) setFetchEnabled(false);
+                }}
+                className="h-3 w-3 accent-primary"
+              />
+              <span className="text-[11px] text-muted-foreground">Decode</span>
+            </label>
+          </div>
+        </div>
+        <Select
+          value={fnSelect}
+          onValueChange={(v) => {
+            setFnSelect(v);
+            setEncoded("");
+            setEncodeError("");
+            setArgErrors([]);
+            setDecodeResult("");
+            setDecodeError("");
+            setFetchResult("");
+            setFetchError("");
+          }}
+        >
+          <SelectTrigger className="h-7 min-w-0 text-xs font-mono [&>span]:flex [&>span]:min-w-0 [&>span]:items-center [&>span]:gap-1.5 [&>span]:overflow-hidden">
+            <SelectValue placeholder="Function" />
+          </SelectTrigger>
+          <SelectContent className="max-h-[200px]">
+            <SelectItem value="custom" className="text-xs font-mono">
+              <span className="flex items-center gap-1.5">
+                <Code className="h-3 w-3 shrink-0 opacity-70" aria-hidden />
+                <span>custom (manual signature)</span>
+              </span>
+            </SelectItem>
+            {functions.map((f, i) => {
+              let sel: string;
+              try {
+                sel = toFunctionSelector(f);
+              } catch {
+                sel = "0x????????";
+              }
+              const read = isAbiFunctionRead(f);
+              return (
+                <SelectItem key={`fn-${i}`} value={`fn-${i}`} className="text-xs font-mono">
+                  <span className="flex items-center gap-1.5">
+                    {read ? (
+                      <Eye className="h-3 w-3 shrink-0 text-emerald-600" aria-hidden />
+                    ) : (
+                      <PenLine className="h-3 w-3 shrink-0 text-amber-600" aria-hidden />
+                    )}
+                    <span className="min-w-0 truncate">{formatFunctionLabel(f, sel)}</span>
+                  </span>
+                </SelectItem>
+              );
+            })}
+          </SelectContent>
+        </Select>
+
+        {fnSelect === "custom" && (
+          <Input
+            placeholder="transfer(address,uint256)"
+            value={customSig}
+            onChange={(e) => {
+              setCustomSig(e.target.value);
+              setEncoded("");
+              setEncodeError("");
+              setDecodeResult("");
+              setDecodeError("");
+              setFetchResult("");
+              setFetchError("");
+            }}
+            className="font-mono h-7 text-xs"
+          />
+        )}
+
+        {abiOpMode === "decode" && (
+          <div className="space-y-1">
+            <label className="text-[10px] text-muted-foreground">Calldata (hex)</label>
+            <Textarea
+              value={decodeCalldata}
+              onChange={(e) => {
+                setDecodeCalldata(e.target.value);
+                setDecodeResult("");
+                setDecodeError("");
+              }}
+              placeholder="0x…"
+              className="min-h-[56px] max-h-[120px] resize-y font-mono text-xs"
+              spellCheck={false}
+            />
+            <Button size="sm" className="h-7 px-2 text-xs w-fit" onClick={runDecode}>
+              Decode
+            </Button>
+            {decodeError && <Err msg={decodeError} />}
+            {decodeResult && (
+              <pre className="max-h-[140px] overflow-auto rounded bg-muted px-2 py-1 font-mono text-xs select-all whitespace-pre-wrap break-all">
+                {decodeResult}
+              </pre>
+            )}
+          </div>
+        )}
+
+        {abiOpMode === "encode" && (
+          <>
+            {params.length === 0 && currentFunction && (
+              <p className="text-[10px] text-muted-foreground">No parameters</p>
+            )}
+
+            {params.map((p, i) => (
+              <div key={`${p.name ?? "arg"}-${i}-${p.type}`} className="space-y-0.5">
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <label
+                    className="shrink-0 max-w-[42%] text-[10px] font-mono text-muted-foreground sm:max-w-[40%]"
+                    title={`${p.name || `arg${i}`}: ${p.type}`}
+                  >
+                    <span className="text-foreground/90">{p.name || `arg${i}`}</span>
+                    <span className="text-muted-foreground">: {p.type}</span>
+                  </label>
+                  <Input
+                    value={argValues[i] ?? ""}
+                    onChange={(e) => setArgAt(i, e.target.value)}
+                    placeholder={
+                      p.type === "tuple" || p.type.startsWith("tuple(") || (p.type.includes("[") && p.type.includes("]"))
+                        ? 'JSON e.g. ["0x...", 1]'
+                        : p.type === "address"
+                          ? "0x…"
+                          : p.type === "bool"
+                            ? "true / false"
+                            : p.type === "string"
+                              ? "text"
+                              : p.type.startsWith("uint") || p.type.startsWith("int")
+                                ? "decimal or 0x…"
+                                : p.type.startsWith("bytes")
+                                  ? "0x…"
+                                  : "value"
+                    }
+                    className={`min-w-0 flex-1 font-mono h-7 text-xs ${argErrors[i] ? "border-amber-500" : ""}`}
+                  />
+                </div>
+                {argErrors[i] && <p className="text-[10px] leading-tight text-amber-500">{argErrors[i]}</p>}
+              </div>
+            ))}
+
+            {fetchEnabled && (
+              <div className="space-y-0.5">
+                <label className="text-[10px] text-muted-foreground">Contract address</label>
+                <Input
+                  placeholder="0x…"
+                  value={fetchAddress}
+                  onChange={(e) => {
+                    setFetchAddress(e.target.value);
+                    setFetchResult("");
+                    setFetchError("");
+                  }}
+                  className="font-mono h-7 text-xs"
+                />
+              </div>
+            )}
+
+            <div className="flex flex-wrap items-center gap-2">
+              <Button size="sm" className="h-7 px-2 text-xs w-fit" onClick={runEncode}>
+                Encode
+              </Button>
+              {fetchEnabled && (
+                <Button
+                  size="sm"
+                  className="h-7 px-2 text-xs w-fit"
+                  onClick={() => void runFetch()}
+                  disabled={fetchLoading}
+                >
+                  {fetchLoading ? "…" : "Fetch"}
+                </Button>
+              )}
+            </div>
+            {fetchError && <Err msg={fetchError} />}
+            {fetchResult && (
+              <pre className="max-h-[120px] overflow-auto rounded bg-muted px-2 py-1 font-mono text-xs select-all whitespace-pre-wrap break-all">
+                {fetchResult}
+              </pre>
+            )}
+            {encodeError && <Err msg={encodeError} />}
+            {encoded && (
+              <div className="space-y-0.5">
+                <span className="text-[10px] text-muted-foreground">Calldata</span>
+                <div className="flex items-start gap-1">
+                  <div className="min-w-0 flex-1">
+                    <ResultBox value={encoded} />
+                  </div>
+                  <button
+                    type="button"
+                    title="Copy calldata"
+                    className="mt-0.5 inline-flex shrink-0 border-0 bg-transparent p-0 text-muted-foreground shadow-none outline-none ring-0 transition-colors hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring"
+                    onClick={() => {
+                      void navigator.clipboard.writeText(encoded);
+                    }}
+                  >
+                    <Copy className="h-3.5 w-3.5" aria-hidden />
+                    <span className="sr-only">Copy calldata</span>
+                  </button>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
     </div>
   );
+}
+
+function normalizeStorageSlotHex(raw: string): `0x${string}` | null {
+  const s = raw.trim().replace(/^0x/i, "");
+  if (!s || !/^[0-9a-fA-F]+$/.test(s)) return null;
+  if (s.length > 64) return null;
+  return `0x${s.padStart(64, "0").toLowerCase()}` as `0x${string}`;
 }
 
 function SlotTool() {
@@ -293,19 +880,22 @@ function SlotTool() {
   const [mapKey, setMapKey] = useState("");
   const [arrIdx, setArrIdx] = useState("0");
   const [computedSlot, setComputedSlot] = useState("");
+  const [calcError, setCalcError] = useState("");
+
   const [address, setAddress] = useState("");
+  const [readSlot, setReadSlot] = useState("");
   const [fetchResult, setFetchResult] = useState("");
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
+  const [readError, setReadError] = useState("");
 
   const computeSlot = (): string | null => {
     try {
       const slotN = parseNumber(baseSlot);
-      if (slotN === null) { setError("Invalid base slot"); return null; }
+      if (slotN === null) { setCalcError("Invalid base slot"); return null; }
       const slotPadded = pad(`0x${slotN.toString(16)}` as `0x${string}`, { size: 32 });
       if (kind === "plain") return `0x${slotN.toString(16).padStart(64, "0")}`;
       if (kind === "mapping") {
-        const k = mapKey.trim(); if (!k) { setError("Key required"); return null; }
+        const k = mapKey.trim(); if (!k) { setCalcError("Key required"); return null; }
         const keyPadded = isAddress(k)
           ? pad(k as `0x${string}`, { size: 32 })
           : (() => { const kn = parseNumber(k); if (kn === null) throw new Error("Invalid key"); return pad(`0x${kn.toString(16)}` as `0x${string}`, { size: 32 }); })();
@@ -313,82 +903,113 @@ function SlotTool() {
       }
       if (kind === "array") {
         const base = BigInt(keccak256(slotPadded));
-        const idxN = parseNumber(arrIdx); if (idxN === null) { setError("Invalid index"); return null; }
+        const idxN = parseNumber(arrIdx); if (idxN === null) { setCalcError("Invalid index"); return null; }
         return `0x${(base + idxN).toString(16).padStart(64, "0")}`;
       }
       return null;
-    } catch (e) { setError(e instanceof Error ? e.message : String(e)); return null; }
+    } catch (e) { setCalcError(e instanceof Error ? e.message : String(e)); return null; }
   };
 
   const handleCalc = () => {
-    setError(""); setFetchResult(""); setComputedSlot("");
+    setCalcError(""); setComputedSlot("");
     const s = computeSlot(); if (s) setComputedSlot(s);
   };
 
+  const applyComputedToRead = () => {
+    if (computedSlot) setReadSlot(computedSlot);
+  };
+
   const handleFetch = async () => {
-    setError(""); setFetchResult("");
-    let slot = computedSlot;
-    if (!slot) { const s = computeSlot(); if (!s) return; slot = s; setComputedSlot(s); }
+    setReadError(""); setFetchResult("");
     const addr = address.trim();
-    if (!addr || !isAddress(addr)) { setError("Valid contract address required"); return; }
+    if (!addr || !isAddress(addr)) { setReadError("Valid contract address required"); return; }
+    const slotNorm = normalizeStorageSlotHex(readSlot);
+    if (!slotNorm) { setReadError("Enter storage slot (hex, ≤32 bytes)"); return; }
     setLoading(true);
     try {
       const client = createPublicClient({ transport: http(getSelectedRpc()) });
-      const value = await client.getStorageAt({ address: addr as `0x${string}`, slot: slot as `0x${string}` });
+      const value = await client.getStorageAt({ address: addr as `0x${string}`, slot: slotNorm });
       setFetchResult(value ?? "0x" + "0".repeat(64));
-    } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    } catch (e) { setReadError(e instanceof Error ? e.message : String(e)); }
     finally { setLoading(false); }
   };
 
   return (
-    <div className="space-y-1.5">
-      <div className="flex gap-1.5 flex-wrap">
-        <Select value={kind} onValueChange={(v) => { setKind(v as typeof kind); setComputedSlot(""); setError(""); }}>
-          <SelectTrigger className="h-7 text-xs w-24 font-mono shrink-0">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="mapping" className="text-xs font-mono">mapping</SelectItem>
-            <SelectItem value="array" className="text-xs font-mono">array</SelectItem>
-            <SelectItem value="plain" className="text-xs font-mono">plain</SelectItem>
-          </SelectContent>
-        </Select>
-        <Input placeholder="Base slot (0 or 0x0)" value={baseSlot}
-          onChange={(e) => { setBaseSlot(e.target.value); setComputedSlot(""); setError(""); }}
-          className="font-mono h-7 text-xs w-32" />
-        {kind === "mapping" && (
-          <Input placeholder="Key (address or uint)" value={mapKey}
-            onChange={(e) => { setMapKey(e.target.value); setComputedSlot(""); setError(""); }}
-            className="font-mono h-7 text-xs flex-1 min-w-[120px]" />
-        )}
-        {kind === "array" && (
-          <Input placeholder="Index" value={arrIdx}
-            onChange={(e) => { setArrIdx(e.target.value); setComputedSlot(""); setError(""); }}
-            className="font-mono h-7 text-xs w-20" />
-        )}
-        <Button size="sm" className="h-7 px-2 text-xs shrink-0" onClick={handleCalc}>Calc</Button>
-      </div>
-      {computedSlot && (
-        <div className="flex items-center gap-1.5">
-          <span className="text-[10px] text-muted-foreground shrink-0">slot</span>
-          <ResultBox value={computedSlot} />
+    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 min-h-0 divide-y sm:divide-y-0 sm:divide-x divide-border">
+      {/* Left: dynamic slot (mapping / array / plain) */}
+      <div className="space-y-1.5 min-w-0 pb-2 sm:pb-0 sm:pr-2">
+        <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">Slot calculator</p>
+        <div className="flex flex-col gap-1.5">
+          <div className="flex gap-1.5 flex-wrap items-center">
+            <Select value={kind} onValueChange={(v) => { setKind(v as typeof kind); setComputedSlot(""); setCalcError(""); }}>
+              <SelectTrigger className="h-7 text-xs w-24 font-mono shrink-0">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="mapping" className="text-xs font-mono">mapping</SelectItem>
+                <SelectItem value="array" className="text-xs font-mono">array</SelectItem>
+                <SelectItem value="plain" className="text-xs font-mono">plain</SelectItem>
+              </SelectContent>
+            </Select>
+            <Input placeholder="Base slot (0 or 0x0)" value={baseSlot}
+              onChange={(e) => { setBaseSlot(e.target.value); setComputedSlot(""); setCalcError(""); }}
+              className="font-mono h-7 text-xs flex-1 min-w-[100px]" />
+          </div>
+          {kind === "mapping" && (
+            <Input placeholder="Key (address or uint)" value={mapKey}
+              onChange={(e) => { setMapKey(e.target.value); setComputedSlot(""); setCalcError(""); }}
+              className="font-mono h-7 text-xs w-full" />
+          )}
+          {kind === "array" && (
+            <Input placeholder="Element index" value={arrIdx}
+              onChange={(e) => { setArrIdx(e.target.value); setComputedSlot(""); setCalcError(""); }}
+              className="font-mono h-7 text-xs w-full max-w-[200px]" />
+          )}
+          <Button size="sm" className="h-7 px-2 text-xs w-fit" onClick={handleCalc}>Calculate</Button>
         </div>
-      )}
-      <div className="flex gap-1.5">
-        <Input placeholder="Contract address (for getStorageAt)" value={address}
-          onChange={(e) => { setAddress(e.target.value); setFetchResult(""); setError(""); }}
-          className="font-mono h-7 text-xs flex-1" />
-        <Button size="sm" className="h-7 px-2 text-xs shrink-0" onClick={handleFetch} disabled={loading}>
-          {loading ? "..." : "Read"}
-        </Button>
+        {calcError && <Err msg={calcError} />}
+        {computedSlot && (
+          <div className="space-y-0.5">
+            <span className="text-[10px] text-muted-foreground">Computed slot</span>
+            <ResultBox value={computedSlot} />
+          </div>
+        )}
       </div>
-      {error && <Err msg={error} />}
-      {fetchResult && (
-        <div className="flex items-center gap-1.5">
-          <span className="text-[10px] text-muted-foreground shrink-0">value</span>
-          <ResultBox value={fetchResult} />
+
+      {/* Right: eth_getStorageAt by address + slot */}
+      <div className="space-y-1.5 min-w-0 pt-2 sm:pt-0 sm:pl-2">
+        <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">Read storage</p>
+        <Input placeholder="Contract address" value={address}
+          onChange={(e) => { setAddress(e.target.value); setFetchResult(""); setReadError(""); }}
+          className="font-mono h-7 text-xs w-full" />
+        <div className="flex gap-1.5 items-center">
+          <Input placeholder="Slot (hex key, e.g. 0x…)" value={readSlot}
+            onChange={(e) => { setReadSlot(e.target.value); setFetchResult(""); setReadError(""); }}
+            className="font-mono h-7 text-xs flex-1 min-w-0"
+            onKeyDown={(e) => e.key === "Enter" && handleFetch()} />
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-7 px-2 text-[10px] shrink-0"
+            title="Fill slot from left calculator"
+            onClick={applyComputedToRead}
+            disabled={!computedSlot}
+          >
+            ← calc
+          </Button>
+          <Button size="sm" className="h-7 px-2 text-xs shrink-0" onClick={handleFetch} disabled={loading}>
+            {loading ? "..." : "Read"}
+          </Button>
         </div>
-      )}
+        {readError && <Err msg={readError} />}
+        {fetchResult && (
+          <div className="space-y-0.5">
+            <span className="text-[10px] text-muted-foreground">Value</span>
+            <ResultBox value={fetchResult} />
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -476,6 +1097,7 @@ export function UtilitiesDrawer() {
       sheetTitle="Utilities"
       defaultHeightPx={320}
       minHeightPx={200}
+      contentForceMount
     >
         {/* Header + tabs — 与 Call Tree / Event Logs 同一套尺寸（11px、h-5 控件、h-3 图标） */}
         <div className="flex flex-nowrap items-center gap-x-1.5 border-b border-border bg-muted/60 px-2 py-1 text-[11px] shrink-0">
@@ -523,13 +1145,15 @@ export function UtilitiesDrawer() {
             <div className="overflow-auto px-3 pt-1.5 pb-2"><GweiTool /></div>
             <div className="overflow-auto px-3 pt-1.5 pb-2"><TimestampTool /></div>
           </div>
+        ) : activeTool === "abi" ? (
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-3 pt-1.5 pb-2">
+            <AbiTool />
+          </div>
         ) : (
           <div className="flex-1 overflow-auto px-3 pt-1.5 pb-2">
-            {activeTool === "keccak256" && <Keccak256Tool />}
-            {activeTool === "4byte"     && <FourByteTool />}
-            {activeTool === "checksum"  && <ChecksumTool />}
-            {activeTool === "abi"       && <AbiTool />}
-            {activeTool === "slot"      && <SlotTool />}
+            {activeTool === "hash4byte" && <KeccakFourByteTool />}
+            {activeTool === "checksum"   && <ChecksumTool />}
+            {activeTool === "slot"       && <SlotTool />}
           </div>
         )}
     </BottomSheetShell>

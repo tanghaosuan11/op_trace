@@ -94,6 +94,16 @@ pub struct MemoryPatch {
     pub data: Vec<u8>,
 }
 
+/// Frame 结束后的终态（post-state）。
+/// 只在 call_end/create_end 时写入一次，供 seek_to 在“frame 已结束”时返回。
+#[derive(Clone)]
+pub struct FrameTerminalState {
+    pub pc: u32,
+    pub opcode: u8,
+    pub stack: Vec<U256>,
+    pub memory: Vec<u8>,
+}
+
 /// 每个 frame 的内存追踪数据
 pub struct FrameMemory {
     pub snapshots: Vec<MemorySnapshot>,
@@ -123,6 +133,8 @@ pub struct DebugSession {
     pub shadow: Option<super::shadow::ShadowState>,
     /// 每帧的字节码，供 CFG 后端构建使用
     pub frame_bytecodes: HashMap<FrameScopeKey, Vec<u8>>,
+    /// 每帧终态（frame 已退出后的 post-state）
+    pub frame_terminal_states: HashMap<FrameScopeKey, FrameTerminalState>,
     /// `build_cfg` 结果缓存（bincode 序列化的 `CfgResult`）
     pub cfg_build_cache: HashMap<CfgBuildCacheKey, Vec<u8>>,
 }
@@ -137,6 +149,7 @@ impl DebugSession {
             storage_changes: Vec::new(),
             shadow: None,
             frame_bytecodes: HashMap::new(),
+            frame_terminal_states: HashMap::new(),
             cfg_build_cache: HashMap::new(),
         }
     }
@@ -205,6 +218,16 @@ impl DebugSession {
             .or_insert_with(FrameMemory::new)
             .patches
             .push(MemoryPatch { frame_step, dst_offset, data });
+    }
+
+    pub fn set_terminal_state(
+        &mut self,
+        transaction_id: u32,
+        context_id: u16,
+        state: FrameTerminalState,
+    ) {
+        self.frame_terminal_states
+            .insert((transaction_id, context_id), state);
     }
 
     /// 计算指定 frame 在指定 frame_step 时的完整内存

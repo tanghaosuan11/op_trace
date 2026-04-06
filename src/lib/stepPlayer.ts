@@ -143,7 +143,19 @@ export function parseStepBatch(data: Uint8Array): StepData[] {
     }
     offset += 8;
 
-    steps[stepCount++] = { transactionId, contextId, depth, pc, opcode, gasCost, gasRemaining, frameStepCount, stackTop, stackSecond, stackThird };
+    steps[stepCount++] = {
+      transactionId,
+      contextId,
+      depth,
+      pc,
+      opcode,
+      gasCost,
+      gasRemaining,
+      frameStepCount,
+      stackTop,
+      stackSecond,
+      stackThird,
+    };
   }
 
   steps.length = stepCount;

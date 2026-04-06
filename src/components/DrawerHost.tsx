@@ -6,15 +6,26 @@ import { SymbolicSolveDrawer } from "@/components/SymbolicSolveDrawer";
 
 interface DrawerHostProps {
   onSeekToWithHistory: (index: number) => void;
+  /** Insert PC breakpoints at each step index found in the analysis result JSON/text. */
+  onInsertBreakpointsFromAnalysisResult?: (resultText: string) => void;
+  /** Replace step playback queue with indices from analysis result (Analysis Play). */
+  onReplacePlaybackFromAnalysisResult?: (resultText: string) => void;
 }
 
-export function DrawerHost({ onSeekToWithHistory }: DrawerHostProps) {
+export function DrawerHost({
+  onSeekToWithHistory,
+  onInsertBreakpointsFromAnalysisResult,
+  onReplacePlaybackFromAnalysisResult,
+}: DrawerHostProps) {
   return (
     <>
       <TestDialog />
       <GlobalLogDrawer onSeekTo={onSeekToWithHistory} />
       <UtilitiesDrawer />
-      <AnalysisDrawer />
+      <AnalysisDrawer
+        onInsertBreakpointsFromResult={onInsertBreakpointsFromAnalysisResult}
+        onReplaceStepsToPlaybackFromResult={onReplacePlaybackFromAnalysisResult}
+      />
       <SymbolicSolveDrawer />
     </>
   );
