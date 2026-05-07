@@ -123,6 +123,12 @@ pub async fn range_full_data(
     #[allow(non_snake_case)] sessionId: Option<String>,
     state: tauri::State<'_, op_trace::DebugSessionState>,
 ) -> Result<serde_json::Value, String> {
+    if end.saturating_sub(start) >= 5000 {
+        return Err(format!(
+            "range_full_data: range {}..{} exceeds 5000-step limit",
+            start, end
+        ));
+    }
     let session_arc = Arc::clone(&state.0);
     let sid = resolve_required_session_id(session_id, sessionId, "range_full_data")?;
     let (tx, rx) = std::sync::mpsc::channel::<Result<serde_json::Value, String>>();

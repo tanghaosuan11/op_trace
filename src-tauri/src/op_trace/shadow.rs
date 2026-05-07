@@ -898,8 +898,9 @@ impl ShadowState {
                 for _ in 0..3 {
                     parents.push(self.pop_shadow());
                 }
-                // init_code 来自内存
-                self.pending_calldata_shadow = Some(self.memory_slice(offset, size));
+                // init_code 内存影响 CREATE 结果；但 EVM 中子帧 calldata 为空。
+                parents.extend(self.memory_parents(offset, size));
+                self.pending_calldata_shadow = Some(Vec::new());
 
                 let nid = self.alloc_node(gs, pc32, opcode, parents);
                 self.pending_ret_stack.push((nid, gs));
@@ -915,7 +916,9 @@ impl ShadowState {
                 for _ in 0..4 {
                     parents.push(self.pop_shadow());
                 }
-                self.pending_calldata_shadow = Some(self.memory_slice(offset, size));
+                // init_code 内存影响 CREATE2 结果；子帧 calldata 为空。
+                parents.extend(self.memory_parents(offset, size));
+                self.pending_calldata_shadow = Some(Vec::new());
 
                 let nid = self.alloc_node(gs, pc32, opcode, parents);
                 self.pending_ret_stack.push((nid, gs));
@@ -1883,6 +1886,15 @@ impl ShadowState {
     /// 取出 ShadowState（用于写回 DebugSession）
     pub fn take(self) -> Self {
         self
+    }
+
+    /// 多笔交易边界重置：EIP-1153 规定瞬态存储在每笔交易结束时清空。
+    /// 持久 storage 跨 tx 保留；return_data/pending_calldata/pending_ret 也需重置。
+    pub fn begin_new_transaction(&mut self) {
+        self.shadow_transient.clear();
+        self.return_data_shadow.clear();
+        self.pending_calldata_shadow = None;
+        self.pending_ret_stack.clear();
     }
 
     pub fn validate_step_consistency(&self, max_mismatches: usize) -> ShadowValidationReport {

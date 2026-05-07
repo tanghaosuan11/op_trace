@@ -71,7 +71,7 @@ export function KeyboardShortcutsHelpDialog() {
 
   return (
     <Dialog open={open} onOpenChange={(o) => sync({ isKeyboardShortcutsHelpOpen: o })}>
-      <DialogContent
+      <DialogContent aria-describedby={undefined}
         showClose={false}
         className="flex h-[min(86vh,640px)] w-[calc(100vw-2rem)] max-w-2xl flex-col gap-0 overflow-hidden p-0 sm:h-[min(86vh,640px)] sm:w-full"
       >

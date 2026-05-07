@@ -63,6 +63,12 @@ pub struct SymConfig {
     /// 每项 `(slot_hex64, name)`
     #[serde(default)]
     pub storage_symbols: Vec<(String, String)>,
+
+    /// 反编译模式：把所有环境 opcode、子帧 CALLDATALOAD、未被写入的 SLOAD/TLOAD
+    /// 一律合成为自由符号，保证 JUMPI 条件、tstore/sstore 的表达式尽量不丢失来源。
+    /// 仅供 decompile 路径使用；SMT 求解侧不要开启（会引入无约束自由变量）。
+    #[serde(default)]
+    pub decompile_mode: bool,
 }
 
 impl Default for SymConfig {
@@ -75,6 +81,7 @@ impl Default for SymConfig {
             timestamp_sym: false,
             block_number_sym: false,
             storage_symbols: Vec::new(),
+            decompile_mode: false,
         }
     }
 }

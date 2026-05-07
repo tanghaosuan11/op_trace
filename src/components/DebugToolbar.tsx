@@ -5,7 +5,9 @@ import { BottomSheetShell } from "@/components/ui/bottom-sheet-shell";
 import { Input } from "@/components/ui/input";
 import { ProgressBar } from "@/components/ProgressBar";
 import { CallTreeViewer } from "@/components/CallTreeViewer";
+import { RangeDiffDialog } from "@/components/RangeDiffDialog";
 import { useDebugStore } from "@/store/debugStore";
+import type { StepData } from "@/lib/stepPlayer";
 import { useForkStore } from "@/store/forkStore";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -61,6 +63,8 @@ interface DebugToolbarProps {
   onNavigateTo?: (stepIndex: number, frameId: string) => void;
   onStartDebug?: () => void;
   onOpenCfgWindow?: () => void;
+  allStepsRef: React.RefObject<StepData[]>;
+  fullDataCacheRef: React.RefObject<import("@/hooks/useDebugPlayback").StepFullData[] | null>;
 }
 
 export function DebugToolbar({
@@ -80,6 +84,8 @@ export function DebugToolbar({
   onNavigateTo,
   onStartDebug,
   onOpenCfgWindow,
+  allStepsRef,
+  fullDataCacheRef,
 }: DebugToolbarProps) {
   interface PatternCacheEntry {
     selector: string;
@@ -124,6 +130,7 @@ export function DebugToolbar({
   const rpcUrl = useDebugStore((s) => s.config.rpcUrl);
   const sessionId = useDebugStore((s) => s.sessionId);
   const hasCallTree = useDebugStore((s) => s.callTreeNodes.length > 0);
+  const rangeEnabled = useDebugStore((s) => s.rangeEnabled);
   const isCallTreeOpen = useDebugStore((s) => s.isCallTreeOpen);
   const activeTab = useDebugStore((s) => s.activeTab);
   const callFrames = useDebugStore((s) => s.callFrames);
@@ -490,6 +497,25 @@ export function DebugToolbar({
       >
         Cfg
       </Button>
+      {rangeEnabled && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-6 px-2 text-[11px]"
+          title="统计选定范围内的 Gas、指令、Storage 变化"
+          disabled={disabled}
+          onClick={() => {
+            const { rangeStart, rangeEnd } = useDebugStore.getState();
+            if (rangeEnd - rangeStart >= 5000) {
+              toast.error("统计范围不能超过 5000 步，请缩小选定范围");
+              return;
+            }
+            useDebugStore.getState().sync({ isRangeDiffOpen: true });
+          }}
+        >
+          Stats
+        </Button>
+      )}
       {/* Notes button — hidden until feature is complete
       <Button
         variant="outline"
@@ -985,6 +1011,7 @@ export function DebugToolbar({
               onSpeedChange={onSpeedChange}
             />
           </div>
+
         </div>
       )}
 
@@ -1006,6 +1033,7 @@ export function DebugToolbar({
     </BottomSheetShell>
 
     <ShadowDiagnosticsDialog open={diagnosticsDialogOpen} onOpenChange={setDiagnosticsDialogOpen} />
+    <RangeDiffDialog allStepsRef={allStepsRef} fullDataCacheRef={fullDataCacheRef} />
     </>
   );
 }

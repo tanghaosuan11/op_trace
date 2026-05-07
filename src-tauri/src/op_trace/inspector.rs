@@ -153,6 +153,10 @@ impl<BlockT, TxT, CfgT> Cheatcodes<BlockT, TxT, CfgT> {
     /// 多笔顺序执行时，在每笔开始前设置（单 tx 无需调用）
     pub(crate) fn set_transaction_id(&mut self, id: u32) {
         self.transaction_id = id;
+        // EIP-1153：瞬态存储按 tx 清空
+        if self.shadow_enabled {
+            self.shadow.begin_new_transaction();
+        }
     }
 
     /// 多笔调试：每笔交易执行前调用，重置帧计数器，使 frame_id 在每笔内从 1 起递增。
@@ -889,13 +893,13 @@ where
         _outcome: &mut CallOutcome,
     ) {
         self.frame_manager
-            .current_update_outcome(_outcome.result.output.clone(), _outcome.result.gas.spent());
+            .current_update_outcome(_outcome.result.output.clone(), _outcome.result.gas.total_gas_spent());
         self.frame_manager
             .current_update_status(_outcome.result.clone());
         let frame_id = self.frame_manager.current_id();
         let result = _outcome.result.result;
         let success = self.frame_manager.current_is_success();
-        let gas_used = _outcome.result.gas.spent();
+        let gas_used = _outcome.result.gas.total_gas_spent();
         let output = self.frame_manager.current_output().clone();
         let frame_step_count = self.frame_manager.current_step_count();
 
@@ -1024,13 +1028,13 @@ where
         self.frame_manager
             .current_update_status(_outcome.result.clone());
         self.frame_manager
-            .current_update_outcome(_outcome.result.output.clone(), _outcome.result.gas.spent());
+            .current_update_outcome(_outcome.result.output.clone(), _outcome.result.gas.total_gas_spent());
         self.frame_manager
             .current_update_status(_outcome.result.clone());
         let frame_id = self.frame_manager.current_id();
         let result = _outcome.result.result;
         let success = self.frame_manager.current_is_success();
-        let gas_used = _outcome.result.gas.spent();
+        let gas_used = _outcome.result.gas.total_gas_spent();
         let output = self.frame_manager.current_output();
         let frame_step_count = self.frame_manager.current_step_count();
 

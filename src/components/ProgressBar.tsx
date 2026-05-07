@@ -63,6 +63,7 @@ const sliderToSpeed = (v: number) => v === 0 ? 1 : v * 5;
 const speedToSlider = (s: number) => s <= 1 ? 0 : Math.round(s / 5);
 
 const THROTTLE_MS = 150;
+const MAX_RANGE_STEPS = 5000;
 
 export function ProgressBar({
   onSeekTo,
@@ -96,7 +97,21 @@ export function ProgressBar({
   const setRangeStart = useCallback((v: number) => sync({ rangeStart: v }), [sync]);
   const setRangeEnd = useCallback((v: number) => sync({ rangeEnd: v }), [sync]);
   const setRange = useCallback((s: number, e: number) => sync({ rangeStart: s, rangeEnd: e }), [sync]);
-  const setRangeEnabled = useCallback((enabled: boolean) => sync({ rangeEnabled: enabled }), [sync]);
+  const setRangeEnabled = useCallback((enabled: boolean) => {
+    if (enabled) {
+      const maxIdx = Math.max(0, stepCount - 1);
+      const center = Math.max(0, currentStepIndex);
+      const HALF = 50;
+      let s = center - HALF;
+      let e = center + HALF;
+      // 一边不足就向另一边扩展
+      if (s < 0) { e = Math.min(maxIdx, e + (-s)); s = 0; }
+      if (e > maxIdx) { s = Math.max(0, s - (e - maxIdx)); e = maxIdx; }
+      sync({ rangeEnabled: true, rangeStart: s, rangeEnd: e });
+    } else {
+      sync({ rangeEnabled: false });
+    }
+  }, [sync, stepCount, currentStepIndex]);
   // 记录当前正在拖动的 thumb index（0=rangeStart, 1=currentStep, 2=rangeEnd）
   const activeThumbRef = useRef<number | null>(null);
 
@@ -236,8 +251,8 @@ export function ProgressBar({
     const maxIdx = stepCount - 1;
 
     if (activeIdx === 0) {
-      // 拖动 rangeStart：只更新 rangeStart，不 seek
-      const newRs = Math.max(0, Math.min(values[0], maxIdx));
+      // 拖动 rangeStart：只更新 rangeStart，不 seek；同时限制与 rangeEnd 的差值
+      const newRs = Math.max(Math.max(0, rangeEnd - (MAX_RANGE_STEPS - 1)), Math.min(values[0], maxIdx));
       setRangeStart(newRs);
     } else if (activeIdx === 1) {
       // 拖动 currentStep：只 seek，不改范围
@@ -251,27 +266,29 @@ export function ProgressBar({
         }, THROTTLE_MS);
       }
     } else if (activeIdx === 2) {
-      // 拖动 rangeEnd：只更新 rangeEnd，不 seek
-      const newRe = Math.max(0, Math.min(values[2], maxIdx));
+      // 拖动 rangeEnd：只更新 rangeEnd，不 seek；同时限制与 rangeStart 的差值
+      const newRe = Math.min(Math.min(rangeStart + (MAX_RANGE_STEPS - 1), maxIdx), Math.max(0, values[2]));
       setRangeEnd(newRe);
     }
-  }, [stepCount, onSeekTo, setRangeStart, setRangeEnd]);
+  }, [stepCount, rangeStart, rangeEnd, onSeekTo, setRangeStart, setRangeEnd]);
 
   const handleRangeSliderCommit = useCallback((values: number[]) => {
     const activeIdx = activeThumbRef.current;
     activeThumbRef.current = null;
     const maxIdx = stepCount - 1;
     if (activeIdx === 0) {
-      setRangeStart(Math.max(0, Math.min(values[0], maxIdx)));
+      const newRs = Math.max(Math.max(0, rangeEnd - (MAX_RANGE_STEPS - 1)), Math.min(values[0], maxIdx));
+      setRangeStart(newRs);
     } else if (activeIdx === 1) {
       if (throttleTimerRef.current) { clearTimeout(throttleTimerRef.current); throttleTimerRef.current = null; }
       pendingValueRef.current = null;
       awaitingCommitRef.current = true;
       onSeekTo(values[1]);
     } else if (activeIdx === 2) {
-      setRangeEnd(Math.max(0, Math.min(values[2], maxIdx)));
+      const newRe = Math.min(Math.min(rangeStart + (MAX_RANGE_STEPS - 1), maxIdx), Math.max(0, values[2]));
+      setRangeEnd(newRe);
     }
-  }, [stepCount, onSeekTo, setRangeStart, setRangeEnd]);
+  }, [stepCount, rangeStart, rangeEnd, onSeekTo, setRangeStart, setRangeEnd]);
 
   // 提交 popover input
   const commitRangeInput = useCallback(() => {
@@ -283,6 +300,8 @@ export function ProgressBar({
     s = Math.max(0, Math.min(s, maxIdx));
     e = Math.max(0, Math.min(e, maxIdx));
     if (e - s < 1) { e = Math.min(s + 1, maxIdx); s = e - 1; }
+    // 限制范围最多 MAX_RANGE_STEPS 步
+    if (e - s >= MAX_RANGE_STEPS) { e = s + MAX_RANGE_STEPS - 1; }
     setRange(s, e);
     setRangeStartInput(String(s + 1));
     setRangeEndInput(String(e + 1));

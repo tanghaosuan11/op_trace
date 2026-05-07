@@ -37,7 +37,7 @@ export function TestDialog() {
 
   return (
     <Dialog open={isOpen} onOpenChange={handleOpenChange}>
-      <DialogContent className="max-w-3xl max-h-[80vh] flex flex-col">
+      <DialogContent aria-describedby={undefined} className="max-w-3xl max-h-[80vh] flex flex-col">
         <DialogHeader>
           <DialogTitle>测试字节码解析</DialogTitle>
           <DialogDescription>

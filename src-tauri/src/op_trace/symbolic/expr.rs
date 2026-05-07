@@ -249,3 +249,166 @@ fn ite(cmp_op: &str, a: &Expr, b: &Expr) -> String {
     format!("(ite ({} {} {}) (_ bv1 256) (_ bv0 256))",
             cmp_op, a.to_smt2(), b.to_smt2())
 }
+
+// ──────────────────────────────────────────────────────────────
+// 反编译用 pseudocode 渲染：区别于 SMT-LIB2，面向人类阅读。
+// ──────────────────────────────────────────────────────────────
+
+/// 把 64 字符 hex 常量裁短：去掉前导零；保留 "0x"
+fn short_hex(h: &str) -> String {
+    let trimmed = h.trim_start_matches('0');
+    if trimmed.is_empty() {
+        "0x0".into()
+    } else {
+        format!("0x{}", trimmed)
+    }
+}
+
+/// 识别 20 字节地址掩码 (0x00..00ffffffffffffffffffffffffffffffffffffffff)
+fn is_address_mask(h: &str) -> bool {
+    h.len() == 64 && h.starts_with(&"0".repeat(24)) && h[24..].chars().all(|c| c == 'f')
+}
+
+/// 是否是小的具体常量
+fn small_const(h: &str) -> Option<u128> {
+    let trimmed = h.trim_start_matches('0');
+    if trimmed.is_empty() {
+        return Some(0);
+    }
+    if trimmed.len() > 32 {
+        return None;
+    }
+    u128::from_str_radix(trimmed, 16).ok()
+}
+
+/// 把符号名映射成更友好的展示（如 `cd_4` → `arg_0`）。
+fn pretty_sym(name: &str) -> String {
+    if let Some(rest) = name.strip_prefix("cd_") {
+        if let Ok(off) = rest.parse::<usize>() {
+            if off == 0 {
+                return "calldata[0:4]".into();
+            }
+            if off >= 4 && (off - 4) % 32 == 0 {
+                let idx = (off - 4) / 32;
+                return format!("arg{}", idx);
+            }
+            return format!("calldata[{}:{}]", off, off + 32);
+        }
+    }
+    // 子帧合成的 calldata：cd@d{depth}_{off}
+    if let Some(rest) = name.strip_prefix("cd@d") {
+        if let Some((d, tail)) = rest.split_once('_') {
+            if let (Ok(depth), Ok(off)) = (d.parse::<usize>(), tail.parse::<usize>()) {
+                if off >= 4 && (off - 4) % 32 == 0 {
+                    return format!("arg{}@d{}", (off - 4) / 32, depth);
+                }
+                return format!("calldata@d{}[{}:{}]", depth, off, off + 32);
+            }
+        }
+    }
+    name.to_string()
+}
+
+impl Expr {
+    /// 生成可读的伪代码表达式（供反编译输出；不保证语义完整）。
+    pub fn to_pseudo(&self) -> String {
+        match self {
+            Expr::Const(h) => short_hex(h),
+            Expr::Sym(n) => pretty_sym(n),
+            Expr::Keccak(uid, children) => {
+                if children.is_empty() {
+                    format!("keccak#{}", uid)
+                } else {
+                    let inner = children
+                        .iter()
+                        .map(|c| c.to_pseudo())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("keccak256({})", inner)
+                }
+            }
+
+            Expr::Add(a, b) => {
+                // Keccak + const offset → struct 字段
+                if let (Expr::Keccak(_, _), Expr::Const(h)) = (a.as_ref(), b.as_ref()) {
+                    if let Some(off) = small_const(h) {
+                        if off > 0 && off < 64 {
+                            return format!("{} + {}", a.to_pseudo(), off);
+                        }
+                    }
+                }
+                format!("({} + {})", a.to_pseudo(), b.to_pseudo())
+            }
+            Expr::Sub(a, b) => format!("({} - {})", a.to_pseudo(), b.to_pseudo()),
+            Expr::Mul(a, b) => format!("({} * {})", a.to_pseudo(), b.to_pseudo()),
+            Expr::Div(a, b) => format!("({} / {})", a.to_pseudo(), b.to_pseudo()),
+            Expr::Sdiv(a, b) => format!("({} /s {})", a.to_pseudo(), b.to_pseudo()),
+            Expr::Urem(a, b) => format!("({} % {})", a.to_pseudo(), b.to_pseudo()),
+            Expr::Srem(a, b) => format!("({} %s {})", a.to_pseudo(), b.to_pseudo()),
+            Expr::Addmod(a, b, c) => {
+                format!("addmod({}, {}, {})", a.to_pseudo(), b.to_pseudo(), c.to_pseudo())
+            }
+            Expr::Mulmod(a, b, c) => {
+                format!("mulmod({}, {}, {})", a.to_pseudo(), b.to_pseudo(), c.to_pseudo())
+            }
+            Expr::Exp(a, b) => format!("({} ** {})", a.to_pseudo(), b.to_pseudo()),
+            Expr::Signext(b, x) => format!("signextend({}, {})", b.to_pseudo(), x.to_pseudo()),
+
+            // SHR(0xe0, CALLDATALOAD(0)) → selector
+            Expr::Shr(sh, v) => {
+                if let Expr::Const(h) = sh.as_ref() {
+                    if let Some(shift_bits) = small_const(h) {
+                        if shift_bits == 224 {
+                            if let Expr::Sym(n) = v.as_ref() {
+                                if n == "cd_0" {
+                                    return "msg.sig".into();
+                                }
+                            }
+                        }
+                        return format!("({} >> {})", v.to_pseudo(), shift_bits);
+                    }
+                }
+                format!("({} >> {})", v.to_pseudo(), sh.to_pseudo())
+            }
+            Expr::Shl(sh, v) => format!("({} << {})", v.to_pseudo(), sh.to_pseudo()),
+            Expr::Sar(sh, v) => format!("({} >>a {})", v.to_pseudo(), sh.to_pseudo()),
+
+            // AND(x, 0xff..ff<20bytes>) → address(x)
+            Expr::And(a, b) => {
+                if let Expr::Const(h) = b.as_ref() {
+                    if is_address_mask(h) {
+                        return format!("address({})", a.to_pseudo());
+                    }
+                    if small_const(h) == Some(0xff) {
+                        return format!("uint8({})", a.to_pseudo());
+                    }
+                }
+                if let Expr::Const(h) = a.as_ref() {
+                    if is_address_mask(h) {
+                        return format!("address({})", b.to_pseudo());
+                    }
+                }
+                format!("({} & {})", a.to_pseudo(), b.to_pseudo())
+            }
+            Expr::Or(a, b) => format!("({} | {})", a.to_pseudo(), b.to_pseudo()),
+            Expr::Xor(a, b) => format!("({} ^ {})", a.to_pseudo(), b.to_pseudo()),
+            Expr::Not(a) => format!("~{}", a.to_pseudo()),
+            Expr::Byteop(i, x) => format!("byte({}, {})", i.to_pseudo(), x.to_pseudo()),
+
+            Expr::Lt(a, b) => format!("({} < {})", a.to_pseudo(), b.to_pseudo()),
+            Expr::Gt(a, b) => format!("({} > {})", a.to_pseudo(), b.to_pseudo()),
+            Expr::Slt(a, b) => format!("({} <s {})", a.to_pseudo(), b.to_pseudo()),
+            Expr::Sgt(a, b) => format!("({} >s {})", a.to_pseudo(), b.to_pseudo()),
+            Expr::Eq(a, b) => format!("({} == {})", a.to_pseudo(), b.to_pseudo()),
+
+            // ISZERO(EQ) → != ;  ISZERO(ISZERO(x)) → bool(x) ; ISZERO(x) → !x
+            Expr::Iszero(inner) => match inner.as_ref() {
+                Expr::Eq(a, b) => format!("({} != {})", a.to_pseudo(), b.to_pseudo()),
+                Expr::Iszero(x) => format!("bool({})", x.to_pseudo()),
+                Expr::Lt(a, b) => format!("({} >= {})", a.to_pseudo(), b.to_pseudo()),
+                Expr::Gt(a, b) => format!("({} <= {})", a.to_pseudo(), b.to_pseudo()),
+                _ => format!("!{}", inner.to_pseudo()),
+            },
+        }
+    }
+}

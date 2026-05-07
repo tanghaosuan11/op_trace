@@ -13,9 +13,58 @@ fn slot_hex(v: U256) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+/// 去掉前导 0 的 slot 短名（"0000..0a" → "a"，全 0 → "0"）
+#[inline]
+fn slot_short(v: U256) -> String {
+    let h = slot_hex(v);
+    let t = h.trim_start_matches('0');
+    if t.is_empty() { "0".into() } else { t.to_string() }
+}
+
+/// 反编译模式下生成环境符号：根帧使用 `name`，子帧加深度后缀 `name@d{depth}`
+#[inline]
+fn env_sym(name: &str, depth: usize) -> Expr {
+    if depth == 0 {
+        Expr::Sym(name.to_string())
+    } else {
+        Expr::Sym(format!("{}@d{}", name, depth))
+    }
+}
+
+/// 计算 Expr 树深度，最多递归到 `limit` 层（超过即返回 limit，用于早退）。
+/// 用于 binary() 中防止循环体内表达式树无限增长导致 to_pseudo() 栈溢出。
+fn expr_depth_limit(e: &Expr, limit: usize) -> usize {
+    if limit == 0 {
+        return 0;
+    }
+    match e {
+        Expr::Const(_) | Expr::Sym(_) => 1,
+        Expr::Not(a) | Expr::Iszero(a) => 1 + expr_depth_limit(a, limit - 1),
+        Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b) | Expr::Div(a, b)
+        | Expr::Sdiv(a, b) | Expr::Urem(a, b) | Expr::Srem(a, b) | Expr::Exp(a, b)
+        | Expr::Signext(a, b) | Expr::And(a, b) | Expr::Or(a, b) | Expr::Xor(a, b)
+        | Expr::Shl(a, b) | Expr::Shr(a, b) | Expr::Sar(a, b) | Expr::Byteop(a, b)
+        | Expr::Lt(a, b) | Expr::Gt(a, b) | Expr::Slt(a, b) | Expr::Sgt(a, b)
+        | Expr::Eq(a, b) => {
+            let da = expr_depth_limit(a, limit - 1);
+            let db = expr_depth_limit(b, limit - 1);
+            1 + da.max(db)
+        }
+        Expr::Addmod(a, b, c) | Expr::Mulmod(a, b, c) => {
+            let da = expr_depth_limit(a, limit - 1);
+            let db = expr_depth_limit(b, limit - 1);
+            let dc = expr_depth_limit(c, limit - 1);
+            1 + da.max(db).max(dc)
+        }
+        Expr::Keccak(_, children) => {
+            1 + children.iter().map(|c| expr_depth_limit(c, limit - 1)).max().unwrap_or(0)
+        }
+    }
+}
+
 /// 帧的调用方式
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FrameKind {
+pub enum FrameKind {
     Normal,
     Delegate,
 }
@@ -132,18 +181,27 @@ impl SymbolicEngine {
     }
 
     /// 二元运算通用：弹 a(top), b(second)，根据是否含符号构建表达式后压栈
+    /// 若任一操作数的表达式树深度超过 MAX_EXPR_DEPTH，折叠为 None（防止循环体内树无限增长 → to_pseudo 栈溢出）
     fn binary<F>(&mut self, sv0: U256, sv1: U256, make: F)
     where
         F: FnOnce(Box<Expr>, Box<Expr>) -> Expr,
     {
+        const MAX_EXPR_DEPTH: usize = 12;
         let a = self.pop_sym();
         let b = self.pop_sym();
         let result = match (a, b) {
             (None, None) => None,
             (a, b) => {
-                let ea = a.map(Box::new).unwrap_or_else(|| Box::new(Expr::konst(sv0.to_be_bytes())));
-                let eb = b.map(Box::new).unwrap_or_else(|| Box::new(Expr::konst(sv1.to_be_bytes())));
-                Some(make(ea, eb))
+                // 超过深度上限则折叠为 None，避免大型循环中树爆炸
+                let a_deep = a.as_ref().map_or(false, |e| expr_depth_limit(e, MAX_EXPR_DEPTH + 1) > MAX_EXPR_DEPTH);
+                let b_deep = b.as_ref().map_or(false, |e| expr_depth_limit(e, MAX_EXPR_DEPTH + 1) > MAX_EXPR_DEPTH);
+                if a_deep || b_deep {
+                    None
+                } else {
+                    let ea = a.map(Box::new).unwrap_or_else(|| Box::new(Expr::konst(sv0.to_be_bytes())));
+                    let eb = b.map(Box::new).unwrap_or_else(|| Box::new(Expr::konst(sv1.to_be_bytes())));
+                    Some(make(ea, eb))
+                }
             }
         };
         self.push_sym(result);
@@ -191,6 +249,13 @@ impl SymbolicEngine {
             if let Some(f) = self.frames.last_mut() {
                 f.sym_mem.insert(offset, expr);
             }
+        }
+    }
+
+    /// 清空内存区间 [start, end) 内所有符号条目（用于 MSTORE/COPY 前的陈旧符号清理）
+    fn mem_clear_range(&mut self, start: usize, end: usize) {
+        if let Some(f) = self.frames.last_mut() {
+            f.sym_mem.retain(|&k, _| k < start || k >= end);
         }
     }
 
@@ -340,67 +405,151 @@ impl SymbolicEngine {
             }
 
             // environment constants (pop 0, push 1)
-            0x30 => self.push_sym(None),   // ADDRESS
+            // 反编译模式下全部合成为自由符号，使其参与后续表达式传播
+            0x30 => {                       // ADDRESS
+                let e = if self.config.decompile_mode { Some(env_sym("address", frame_depth)) } else { None };
+                self.push_sym(e);
+            }
             0x32 => {                       // ORIGIN
-                let e = if self.config.origin_sym && frame_depth == 0 {
-                    Some(Expr::Sym("origin".into()))
+                let e = if self.config.origin_sym
+                    || self.config.decompile_mode
+                {
+                    Some(env_sym("origin", frame_depth))
                 } else { None };
                 self.push_sym(e);
             }
             0x33 => {                       // CALLER
-                let e = if self.config.caller_sym && frame_depth == 0 {
-                    Some(Expr::Sym("caller".into()))
+                let e = if self.config.caller_sym || self.config.decompile_mode {
+                    Some(env_sym("caller", frame_depth))
                 } else { None };
                 self.push_sym(e);
             }
             0x34 => {                       // CALLVALUE
-                let e = if self.config.callvalue_sym && frame_depth == 0 {
-                    Some(Expr::Sym("callvalue".into()))
+                let e = if self.config.callvalue_sym || self.config.decompile_mode {
+                    Some(env_sym("callvalue", frame_depth))
                 } else { None };
                 self.push_sym(e);
             }
-            0x36 => self.push_sym(None),   // CALLDATASIZE
-            0x38 => self.push_sym(None),   // CODESIZE
-            0x3a => self.push_sym(None),   // GASPRICE
-            0x3d => self.push_sym(None),   // RETURNDATASIZE
-            0x41 => self.push_sym(None),   // COINBASE
+            0x36 => {                       // CALLDATASIZE
+                let e = if self.config.decompile_mode { Some(env_sym("calldatasize", frame_depth)) } else { None };
+                self.push_sym(e);
+            }
+            0x38 => {                       // CODESIZE
+                let e = if self.config.decompile_mode { Some(env_sym("codesize", frame_depth)) } else { None };
+                self.push_sym(e);
+            }
+            0x3a => {                       // GASPRICE
+                let e = if self.config.decompile_mode { Some(Expr::Sym("gasprice".into())) } else { None };
+                self.push_sym(e);
+            }
+            0x3d => {                       // RETURNDATASIZE
+                let e = if self.config.decompile_mode { Some(env_sym("returndatasize", frame_depth)) } else { None };
+                self.push_sym(e);
+            }
+            0x41 => {                       // COINBASE
+                let e = if self.config.decompile_mode { Some(Expr::Sym("coinbase".into())) } else { None };
+                self.push_sym(e);
+            }
             0x42 => {                       // TIMESTAMP
-                let e = if self.config.timestamp_sym {
+                let e = if self.config.timestamp_sym || self.config.decompile_mode {
                     Some(Expr::Sym("timestamp".into()))
                 } else { None };
                 self.push_sym(e);
             }
             0x43 => {                       // NUMBER
-                let e = if self.config.block_number_sym {
+                let e = if self.config.block_number_sym || self.config.decompile_mode {
                     Some(Expr::Sym("blocknumber".into()))
                 } else { None };
                 self.push_sym(e);
             }
-            0x44 => self.push_sym(None),   // PREVRANDAO
-            0x45 => self.push_sym(None),   // GASLIMIT
-            0x46 => self.push_sym(None),   // CHAINID
-            0x47 => self.push_sym(None),   // SELFBALANCE
-            0x48 => self.push_sym(None),   // BASEFEE
-            0x4a => self.push_sym(None),   // BLOBBASEFEE
-            0x58 => self.push_sym(None),   // PC
-            0x59 => self.push_sym(None),   // MSIZE
-            0x5a => self.push_sym(None),   // GAS
+            0x44 => {                       // PREVRANDAO
+                let e = if self.config.decompile_mode { Some(Expr::Sym("prevrandao".into())) } else { None };
+                self.push_sym(e);
+            }
+            0x45 => {                       // GASLIMIT
+                let e = if self.config.decompile_mode { Some(Expr::Sym("gaslimit".into())) } else { None };
+                self.push_sym(e);
+            }
+            0x46 => {                       // CHAINID
+                let e = if self.config.decompile_mode { Some(Expr::Sym("chainid".into())) } else { None };
+                self.push_sym(e);
+            }
+            0x47 => {                       // SELFBALANCE
+                let e = if self.config.decompile_mode { Some(env_sym("selfbalance", frame_depth)) } else { None };
+                self.push_sym(e);
+            }
+            0x48 => {                       // BASEFEE
+                let e = if self.config.decompile_mode { Some(Expr::Sym("basefee".into())) } else { None };
+                self.push_sym(e);
+            }
+            0x4a => {                       // BLOBBASEFEE
+                let e = if self.config.decompile_mode { Some(Expr::Sym("blobbasefee".into())) } else { None };
+                self.push_sym(e);
+            }
+            0x58 => self.push_sym(None),   // PC (实际就是具体值)
+            0x59 => {                       // MSIZE
+                let e = if self.config.decompile_mode { Some(env_sym("msize", frame_depth)) } else { None };
+                self.push_sym(e);
+            }
+            0x5a => {                       // GAS
+                let e = if self.config.decompile_mode { Some(env_sym("gas", frame_depth)) } else { None };
+                self.push_sym(e);
+            }
 
-            // environment reads (pop 1, push 1)
-            0x31 => { self.pop_sym(); self.push_sym(None); } // BALANCE
-            0x3b => { self.pop_sym(); self.push_sym(None); } // EXTCODESIZE
-            0x3f => { self.pop_sym(); self.push_sym(None); } // EXTCODEHASH
-            0x40 => { self.pop_sym(); self.push_sym(None); } // BLOCKHASH
-            0x49 => { self.pop_sym(); self.push_sym(None); } // BLOBHASH
+            // environment reads (pop 1, push 1) — 把参数包在符号名里，保留 “查谁的” 语义
+            0x31 => {                       // BALANCE
+                let a = self.pop_sym();
+                let e = if self.config.decompile_mode {
+                    let arg = a.map(|e| e.to_pseudo()).unwrap_or_else(|| format!("0x{:x}", sv(0)));
+                    Some(Expr::Sym(format!("balance({})", arg)))
+                } else { None };
+                self.push_sym(e);
+            }
+            0x3b => {                       // EXTCODESIZE
+                let a = self.pop_sym();
+                let e = if self.config.decompile_mode {
+                    let arg = a.map(|e| e.to_pseudo()).unwrap_or_else(|| format!("0x{:x}", sv(0)));
+                    Some(Expr::Sym(format!("extcodesize({})", arg)))
+                } else { None };
+                self.push_sym(e);
+            }
+            0x3f => {                       // EXTCODEHASH
+                let a = self.pop_sym();
+                let e = if self.config.decompile_mode {
+                    let arg = a.map(|e| e.to_pseudo()).unwrap_or_else(|| format!("0x{:x}", sv(0)));
+                    Some(Expr::Sym(format!("extcodehash({})", arg)))
+                } else { None };
+                self.push_sym(e);
+            }
+            0x40 => {                       // BLOCKHASH
+                let a = self.pop_sym();
+                let e = if self.config.decompile_mode {
+                    let arg = a.map(|e| e.to_pseudo()).unwrap_or_else(|| format!("0x{:x}", sv(0)));
+                    Some(Expr::Sym(format!("blockhash({})", arg)))
+                } else { None };
+                self.push_sym(e);
+            }
+            0x49 => {                       // BLOBHASH
+                let a = self.pop_sym();
+                let e = if self.config.decompile_mode {
+                    let arg = a.map(|e| e.to_pseudo()).unwrap_or_else(|| format!("0x{:x}", sv(0)));
+                    Some(Expr::Sym(format!("blobhash({})", arg)))
+                } else { None };
+                self.push_sym(e);
+            }
 
             // CALLDATALOAD (pop 1, push 1)
             0x35 => {
                 let offset = sv(0).as_limbs()[0] as usize;
                 self.pop_sym(); // offset sym
-                let result = self.frames.last()
+                let mut result = self.frames.last()
                     .and_then(|f| f.calldata_sym.get(&offset))
                     .cloned()
                     .unwrap_or(None);
+                // 反编译模式：子帧没命中 → 合成 cd@d{depth}_{off}
+                if result.is_none() && self.config.decompile_mode && frame_depth > 0 {
+                    result = Some(Expr::Sym(format!("cd@d{}_{}", frame_depth, offset)));
+                }
                 self.push_sym(result);
             }
 
@@ -410,6 +559,9 @@ impl SymbolicEngine {
                 let cd_offset  = sv(1).as_limbs()[0] as usize;
                 let size       = sv(2).as_limbs()[0] as usize;
                 self.pop_sym(); self.pop_sym(); self.pop_sym();
+                // 先清空目标区间的陈旧符号
+                let dst_end = dest.saturating_add(size);
+                self.mem_clear_range(dest, dst_end);
                 // 扫描 calldata_sym 中落在 [cd_offset, cd_offset+size) 范围内的所有条目
                 let mut to_write = Vec::new();
                 if let Some(frame) = self.frames.last() {
@@ -425,9 +577,13 @@ impl SymbolicEngine {
                 }
             }
 
-            // CODECOPY (pop 3, push 0)
+            // CODECOPY (pop 3, push 0) — code 为具体字节，清空目标区间的陈旧符号
             0x39 => {
+                let dest = sv(0).as_limbs()[0] as usize;
+                let size = sv(2).as_limbs()[0] as usize;
                 self.pop_sym(); self.pop_sym(); self.pop_sym();
+                let dst_end = dest.saturating_add(size);
+                self.mem_clear_range(dest, dst_end);
             }
 
             // RETURNDATACOPY (pop 3, push 0) — 从子帧的 return data 恢复符号
@@ -436,6 +592,9 @@ impl SymbolicEngine {
                 let ret_offset  = sv(1).as_limbs()[0] as usize;
                 let size        = sv(2).as_limbs()[0] as usize;
                 self.pop_sym(); self.pop_sym(); self.pop_sym();
+                // 先清空目标区间
+                let dst_end = dest_offset.saturating_add(size);
+                self.mem_clear_range(dest_offset, dst_end);
                 let end = ret_offset.saturating_add(size);
                 let mut to_write = Vec::new();
                 if let Some(frame) = self.frames.last() {
@@ -451,9 +610,14 @@ impl SymbolicEngine {
                 }
             }
 
-            // EXTCODECOPY (pop 4, push 0)
+            // EXTCODECOPY (pop 4, push 0) — 外部代码为具体字节，清空目标区间
             0x3c => {
+                // stack: addr(0), destOffset(1), offset(2), size(3)
+                let dest = sv(1).as_limbs()[0] as usize;
+                let size = sv(3).as_limbs()[0] as usize;
                 self.pop_sym(); self.pop_sym(); self.pop_sym(); self.pop_sym();
+                let dst_end = dest.saturating_add(size);
+                self.mem_clear_range(dest, dst_end);
             }
 
             // MLOAD (pop 1, push 1) — 扫描 [offset, offset+32) 范围内的所有符号
@@ -481,6 +645,8 @@ impl SymbolicEngine {
                 let offset = sv(0).as_limbs()[0] as usize;
                 self.pop_sym(); // offset
                 let val_sym = self.pop_sym();
+                // 先清空 [offset, offset+32) 内的所有陈旧符号，再写入新值
+                self.mem_clear_range(offset, offset.saturating_add(32));
                 self.mem_write(offset, val_sym);
             }
 
@@ -491,23 +657,22 @@ impl SymbolicEngine {
                 let offset = sv(0).as_limbs()[0] as usize;
                 self.pop_sym(); // offset
                 let val_sym = self.pop_sym();
-                if val_sym.is_some() {
-                    // 只在有符号时写入；截断语义近似为 And(val, 0xFF)
-                    let truncated = val_sym.map(|e| Expr::And(
-                        Box::new(e),
-                        Box::new(Expr::konst({
-                            let mut b = [0u8; 32];
-                            b[31] = 0xff;
-                            b
-                        })),
-                    ));
-                    self.mem_write(offset, truncated);
-                }
+                // 不管是否含符号，都必须更新该字节偏移（具体写入也要清掉陈旧符号）
+                let truncated = val_sym.map(|e| Expr::And(
+                    Box::new(e),
+                    Box::new(Expr::konst({
+                        let mut b = [0u8; 32];
+                        b[31] = 0xff;
+                        b
+                    })),
+                ));
+                self.mem_write(offset, truncated);
             }
 
             // SLOAD (pop 1, push 1)
             0x54 => {
-                let slot_key = slot_hex(sv(0));
+                let slot_u = sv(0);
+                let slot_key = slot_hex(slot_u);
                 self.pop_sym();
                 // 优先检查 sym_storage：key 存在即表示该 slot 已被 SSTORE 写入，
                 // 无论 value 是 Some(符号) 还是 None(具体值) 都不应回退到 storage_symbols
@@ -519,12 +684,16 @@ impl SymbolicEngine {
                         .and_then(|f| f.sym_storage.get(&slot_key))
                         .cloned()
                         .unwrap_or(None)
+                } else if let Some(name) = self.config.storage_symbols.iter()
+                    .find(|(slot, _)| *slot == slot_key)
+                    .map(|(_, n)| n.clone())
+                {
+                    Some(Expr::Sym(name))
+                } else if self.config.decompile_mode {
+                    // 未被 SSTORE 且 config 未显式声明 → 合成 sload_{short_slot}
+                    Some(Expr::Sym(format!("sload_{}", slot_short(slot_u))))
                 } else {
-                    // 未被 SSTORE → 检查 config.storage_symbols（链上初始状态符号）
-                    self.config.storage_symbols.iter()
-                        .find(|(slot, _)| *slot == slot_key)
-                        .map(|(_, name)| Some(Expr::Sym(name.clone())))
-                        .unwrap_or(None)
+                    None
                 };
                 self.push_sym(result);
             }
@@ -542,13 +711,23 @@ impl SymbolicEngine {
 
             // TLOAD (pop 1, push 1)
             0x5c => {
-                let slot_key = slot_hex(sv(0));
+                let slot_u = sv(0);
+                let slot_key = slot_hex(slot_u);
                 self.pop_sym();
-                let stored = self.frames.last()
-                    .and_then(|f| f.sym_transient.get(&slot_key))
-                    .cloned()
-                    .unwrap_or(None);
-                self.push_sym(stored);
+                let has_in_tstore = self.frames.last()
+                    .map(|f| f.sym_transient.contains_key(&slot_key))
+                    .unwrap_or(false);
+                let result = if has_in_tstore {
+                    self.frames.last()
+                        .and_then(|f| f.sym_transient.get(&slot_key))
+                        .cloned()
+                        .unwrap_or(None)
+                } else if self.config.decompile_mode {
+                    Some(Expr::Sym(format!("tload_{}", slot_short(slot_u))))
+                } else {
+                    None
+                };
+                self.push_sym(result);
             }
 
             // TSTORE (pop 2, push 0)
@@ -567,6 +746,7 @@ impl SymbolicEngine {
                 let src  = sv(1).as_limbs()[0] as usize;
                 let size = sv(2).as_limbs()[0] as usize;
                 self.pop_sym(); self.pop_sym(); self.pop_sym();
+                // 先抓快照，再清空目标区间，最后写入
                 let src_end = src.saturating_add(size);
                 let mut to_write: Vec<(usize, Option<Expr>)> = Vec::new();
                 if let Some(frame) = self.frames.last() {
@@ -577,6 +757,7 @@ impl SymbolicEngine {
                         }
                     }
                 }
+                self.mem_clear_range(dst, dst.saturating_add(size));
                 for (off, sym) in to_write {
                     self.mem_write(off, sym);
                 }
@@ -700,6 +881,42 @@ impl SymbolicEngine {
     /// 公开访问已收集的路径约束
     pub fn constraints(&self) -> &[PathConstraint] {
         &self.path_constraints
+    }
+
+    /// 反编译专用：读取当前帧栈顶第 `from_top` 槽的符号表达式（0 = 栈顶）
+    pub fn peek_sym(&self, from_top: usize) -> Option<Expr> {
+        let f = self.frames.last()?;
+        let n = f.sym_stack.len();
+        if from_top >= n {
+            return None;
+        }
+        f.sym_stack.get(n - 1 - from_top).cloned().flatten()
+    }
+
+    /// 反编译专用：读取当前帧栈深
+    pub fn sym_stack_len(&self) -> usize {
+        self.frames.last().map(|f| f.sym_stack.len()).unwrap_or(0)
+    }
+
+    /// 反编译专用：重置所有帧（多交易边界）
+    pub fn reset_frames(&mut self) {
+        self.frames.clear();
+    }
+
+    /// 反编译专用：扫描当前帧内存 [off, off+size) 内的首个符号条目
+    pub fn peek_mem_sym(&self, offset: usize, size: usize) -> Option<Expr> {
+        let f = self.frames.last()?;
+        if size == 32 {
+            if let Some(Some(e)) = f.sym_mem.get(&offset) {
+                return Some(e.clone());
+            }
+        }
+        let end = offset.saturating_add(size);
+        f.sym_mem
+            .iter()
+            .filter(|(&k, v)| k >= offset && k < end && v.is_some())
+            .min_by_key(|(&k, _)| k)
+            .and_then(|(_, v)| v.clone())
     }
 
 }

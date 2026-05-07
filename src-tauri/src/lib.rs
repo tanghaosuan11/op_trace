@@ -50,6 +50,7 @@ pub fn run() {
             commands::symbolic::symbolic_slice,
             commands::symbolic::symbolic_auto_solve,
             commands::symbolic::symbolic_verify,
+            commands::decompile::decompile_frame_cmd,
             commands::data::fetch_address_labels,
             commands::data::open_app_data_dir,
             commands::data::save_data,

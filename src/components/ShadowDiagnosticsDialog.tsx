@@ -103,7 +103,7 @@ export function ShadowDiagnosticsDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[760px]">
+      <DialogContent aria-describedby={undefined} className="sm:max-w-[760px]">
         <DialogHeader>
           <DialogTitle>Shadow Stack Diagnostics</DialogTitle>
         </DialogHeader>

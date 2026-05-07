@@ -17,6 +17,7 @@ pub mod shadow;
 pub mod fork;
 pub mod cfg_builder;
 pub mod symbolic;
+pub mod decompile;
 pub mod cache;
 pub mod balance_diff;
 mod prestate;
@@ -137,6 +138,12 @@ pub fn seek_to_impl(
         });
     }
 
+    // println!(
+    //     "[seek_to] index={} → {} frames: {}",
+    //     global_index,
+    //     frames.len(),
+    //     frames.iter().map(|f| format!("({},{}):stack={}", f.transaction_id, f.context_id, f.stack.len())).collect::<Vec<_>>().join(", ")
+    // );
     Some(SeekResult {
         active_transaction_id,
         active_context_id,

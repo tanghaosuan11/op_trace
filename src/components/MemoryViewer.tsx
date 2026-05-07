@@ -373,7 +373,7 @@ export function MemoryViewer({ highlightRanges = [], onSelectionChange, scrollCo
 
       {/* 提取内存对话框 */}
       <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent aria-describedby={undefined} className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>Export Memory</DialogTitle>
           </DialogHeader>

@@ -386,7 +386,7 @@ impl<Db: Database + 'static> JournalTr for OpTraceJournal<Db> {
         &mut self,
         address: Address,
         skip_cold_load: bool,
-    ) -> Result<StateLoad<Self::JournaledAccount<'_>>, <Self::Database as Database>::Error> {
+    ) -> Result<StateLoad<Self::JournaledAccount<'_>>, JournalLoadError<<Self::Database as Database>::Error>> {
         self.journaled_state
             .load_account_mut_skip_cold_load(address, skip_cold_load)
     }

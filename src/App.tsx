@@ -735,6 +735,8 @@ function App() {
               onNavigateTo={navigateTo}
               onStartDebug={startDebug}
               onOpenCfgWindow={handleOpenCfgWindow}
+              allStepsRef={allStepsRef}
+              fullDataCacheRef={fullDataCacheRef}
             />
             <StepPlaybackFloatingBar
               onLast={stepPlayback.onStepPlaybackLast}

@@ -158,6 +158,13 @@ impl Slicer {
         }
     }
 
+    /// 清空 [start, end) 内的所有污点条目（用于 MSTORE/COPY 前的区间清理）
+    fn mem_clear_range(&mut self, start: usize, end: usize) {
+        if let Some(f) = self.frames.last_mut() {
+            f.mem.retain(|&k, _| k < start || k >= end);
+        }
+    }
+
     fn mem_read(&self, offset: usize) -> Prov {
         self.frames.last()
             .and_then(|f| f.mem.get(&offset))
@@ -331,6 +338,7 @@ impl Slicer {
                 let cd_offset = sv(1).as_limbs()[0] as usize;
                 let size      = sv(2).as_limbs()[0] as usize;
                 self.pop(); self.pop(); self.pop();
+                self.mem_clear_range(dest, dest.saturating_add(size));
                 let end = cd_offset.saturating_add(size);
                 let mut to_write = Vec::new();
                 if let Some(f) = self.frames.last() {
@@ -345,8 +353,13 @@ impl Slicer {
                 }
             }
 
-            // CODECOPY
-            0x39 => { self.pop(); self.pop(); self.pop(); }
+            // CODECOPY — 清空目标区间（code 具体，无污点来源）
+            0x39 => {
+                let dest = sv(0).as_limbs()[0] as usize;
+                let size = sv(2).as_limbs()[0] as usize;
+                self.pop(); self.pop(); self.pop();
+                self.mem_clear_range(dest, dest.saturating_add(size));
+            }
 
             // RETURNDATACOPY
             0x3e => {
@@ -354,6 +367,7 @@ impl Slicer {
                 let ret_off   = sv(1).as_limbs()[0] as usize;
                 let size      = sv(2).as_limbs()[0] as usize;
                 self.pop(); self.pop(); self.pop();
+                self.mem_clear_range(dest, dest.saturating_add(size));
                 let end = ret_off.saturating_add(size);
                 let mut to_write = Vec::new();
                 if let Some(f) = self.frames.last() {
@@ -368,8 +382,13 @@ impl Slicer {
                 }
             }
 
-            // EXTCODECOPY
-            0x3c => { self.pop(); self.pop(); self.pop(); self.pop(); }
+            // EXTCODECOPY — 外部代码具体，清空目标区间
+            0x3c => {
+                let dest = sv(1).as_limbs()[0] as usize;
+                let size = sv(3).as_limbs()[0] as usize;
+                self.pop(); self.pop(); self.pop(); self.pop();
+                self.mem_clear_range(dest, dest.saturating_add(size));
+            }
 
             // MLOAD — exact match then range scan
             0x51 => {
@@ -391,6 +410,8 @@ impl Slicer {
                 let offset = sv(0).as_limbs()[0] as usize;
                 self.pop();
                 let val = self.pop();
+                // 清空 [offset, offset+32) 内的陈旧污点后再写入
+                self.mem_clear_range(offset, offset.saturating_add(32));
                 self.mem_write(offset, val);
             }
 
@@ -459,6 +480,7 @@ impl Slicer {
                         }
                     }
                 }
+                self.mem_clear_range(dst, dst.saturating_add(size));
                 for (off, p) in to_write {
                     self.mem_write(off, p);
                 }

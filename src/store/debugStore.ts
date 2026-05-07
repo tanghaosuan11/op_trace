@@ -244,6 +244,8 @@ export interface UISlice {
   commandPalettePrefill: string;
   /** 当前焦点面板 ID（用于 Tab 切换和 w/s 滚动控制） */
   activePanelId: string;
+  /** Range Diff 统计对话框 */
+  isRangeDiffOpen: boolean;
 }
 
 const initialUI: UISlice = {
@@ -278,6 +280,7 @@ const initialUI: UISlice = {
   isCommandPaletteOpen: false,
   commandPalettePrefill: "",
   activePanelId: "opcode",
+  isRangeDiffOpen: false,
 };
 
 // Slice 3b: app config

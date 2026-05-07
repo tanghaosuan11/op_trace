@@ -1,8 +1,7 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Fuel, Home, Lock, SlidersHorizontal, Unlock } from "lucide-react";
-import {
+import { Fuel, Home, Lock, SlidersHorizontal, Unlock } from "lucide-react";import {
   Application,
   BitmapFontManager,
   BitmapText,
@@ -38,6 +37,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
+import { DecompileDialog } from "@/components/DecompileDialog";
 
 interface CfgWindowProps {
   sessionId: string;
@@ -748,6 +748,7 @@ export const CfgWindow = forwardRef<CfgWindowHandle, CfgWindowProps>(function Cf
   const [parsedGraph, setParsedGraph] = useState<PlainGraph | null>(null);
   const [loading, setLoading]     = useState(false);
   const [renderErr, setRenderErr] = useState<string | null>(null);
+  const [decompileOpen, setDecompileOpen] = useState(false);
   const pendingLayoutId = useRef<string | null>(null);
   /** 首次加载做 fit；后续切帧仅重居中 */
   const cfgFirstGraphFitDoneRef = useRef(false);
@@ -1638,6 +1639,18 @@ export const CfgWindow = forwardRef<CfgWindowHandle, CfgWindowProps>(function Cf
         </Button>
         <Button
           type="button"
+          variant="outline"
+          size="sm"
+          className="h-6 px-1.5 gap-0.5 text-[10px] hidden"
+          onClick={() => setDecompileOpen(true)}
+          disabled={!selectedFrame}
+          title="Decompile current frame to pseudocode"
+        >
+          <span className="hidden sm:inline">decomp</span>
+          <span className="sm:hidden">dc</span>
+        </Button>
+        <Button
+          type="button"
           variant={seqPlayerOpen ? "secondary" : "outline"}
           size="sm"
           className="h-6 px-1.5 gap-0.5 text-[10px]"
@@ -1782,6 +1795,17 @@ export const CfgWindow = forwardRef<CfgWindowHandle, CfgWindowProps>(function Cf
           </div>
         </SheetContent>
       </Sheet>
+      {selectedFrame && (() => {
+        const { transactionId, contextId } = parseFrameKey(selectedFrame);
+        return (
+          <DecompileDialog
+            open={decompileOpen}
+            onOpenChange={setDecompileOpen}
+            transactionId={transactionId}
+            contextId={contextId}
+          />
+        );
+      })()}
     </div>
   );
 });
