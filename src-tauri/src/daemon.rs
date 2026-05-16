@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! OpTrace daemon — JSON-RPC over stdin/stdout
 //!
 //! VSCode 插件启动本进程，通过 newline-delimited JSON 通信:
@@ -369,6 +370,8 @@ async fn dispatch(req: Request, state: Arc<AppState>, stdout: Arc<Mutex<io::Stdo
             rx.recv().map_err(|e| e.to_string())?
         })(),
 
+        "decompile_bytecode" => decompile_bytecode_handler(&params).await,
+
         other => Err(format!("Unknown method: {}", other)),
     };
 
@@ -379,6 +382,18 @@ async fn dispatch(req: Request, state: Arc<AppState>, stdout: Arc<Mutex<io::Stdo
 }
 
 // ─── op_trace dispatch (streaming) ───────────────────────────────────────────
+
+async fn decompile_bytecode_handler(params: &Value) -> Result<Value, String> {
+    let chain_id: u64 = serde_json::from_value(params.get("chainId").cloned().unwrap_or(Value::Null))
+        .map_err(|e| format!("param 'chainId': {e}"))?;
+    let address: String = serde_json::from_value(params.get("address").cloned().unwrap_or(Value::Null))
+        .map_err(|e| format!("param 'address': {e}"))?;
+    let bytecode: String = serde_json::from_value(params.get("bytecode").cloned().unwrap_or(Value::Null))
+        .map_err(|e| format!("param 'bytecode': {e}"))?;
+    sourcify::decompile_bytecode_impl(chain_id, address, bytecode)
+        .await
+        .map(Value::String)
+}
 
 async fn dispatch_foundry_debug(id: Value, params: Value, state: Arc<AppState>, stdout: Arc<Mutex<io::Stdout>>) {
     let folder_path = match params.get("folderPath").and_then(|v| v.as_str()).map(str::to_owned) {

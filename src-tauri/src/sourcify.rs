@@ -146,10 +146,26 @@ pub fn decompile_write_cache_impl(chain_id: u64, address: &str, json: &str) -> R
     Ok(())
 }
 
-/// 调用 heimdall-decompiler 反编译字节码
+/// 反编译字节码核心逻辑（daemon / Tauri 共用）
+pub async fn decompile_bytecode_impl(
+    chain_id: u64,
+    address: String,
+    bytecode: String,
+) -> Result<String, String> {
+    decompile_bytecode_core(chain_id, address, bytecode).await
+}
+
 #[tauri::command]
 pub async fn decompile_bytecode(
     _app: tauri::AppHandle,
+    chain_id: u64,
+    address: String,
+    bytecode: String,
+) -> Result<String, String> {
+    decompile_bytecode_core(chain_id, address, bytecode).await
+}
+
+async fn decompile_bytecode_core(
     chain_id: u64,
     address: String,
     bytecode: String,
