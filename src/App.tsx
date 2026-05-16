@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { load } from "@tauri-apps/plugin-store";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, loadStore, isRunningInVSCode } from "@/lib/ipc-bridge";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ipcCommands } from "@/lib/ipcConfig";
 import { migrateFromLocalStorage } from "@/lib/tauriStore";
@@ -116,7 +115,7 @@ function App() {
       storeSync(loadAppConfig());
     })();
     // breakOpcodes 持久化到 tauri store
-    load("config.json", { autoSave: true, defaults: {} }).then(store => {
+    loadStore("config.json").then(store => {
       store.get<number[]>("breakOpcodes").then(saved => {
         if (saved && saved.length > 0) {
           const s = new Set<number>(saved);
@@ -145,7 +144,7 @@ function App() {
   // CFG / readonly windows do NOT own the session — skip reset to avoid
   // deleting a session that the main debug window still needs.
   useEffect(() => {
-    if (isCfgMode || getWindowMode().readonly) return;
+    if (isCfgMode || getWindowMode().readonly || isRunningInVSCode()) return;
     const w = getCurrentWindow();
     const unlistenP = w.onCloseRequested(() => {
       invoke(ipcCommands.resetSession, { sessionId: sessionIdRef.current }).catch(() => {});
@@ -157,6 +156,7 @@ function App() {
 
   // Window init payload (fork/whatif)
   useEffect(() => {
+    if (isRunningInVSCode()) return; // VSCode: init data from window.__optrace_init__ (no Tauri events)
     const w = getCurrentWindow();
     const unlistenP = w.listen<{
       tx?: string;
@@ -246,47 +246,69 @@ function App() {
 
   useEffect(() => {
     if (!isCfgMode) return;
-    const w = getCurrentWindow();
-    const unlistenInitP = w.listen<{ sessionId?: string }>("optrace:cfg:init", (ev) => {
-      const sid = (ev.payload?.sessionId || "").trim();
+
+    const handleInit = (payload: { sessionId?: string }) => {
+      const sid = (payload?.sessionId || "").trim();
       if (!sid) return;
-      // Always reset frames on init — this is always a "fresh start" signal
-      // (same sessionId on re-open must also reset, otherwise 3 snapshots×3 = triple counts).
       console.info("[cfg] optrace:cfg:init", { sid });
       setCfgFrames(new Map());
       setCfgSessionId(sid);
-    });
+    };
+
+    const handleFrameBatch = (payload: { sessionId?: string; frames?: { transactionId: number; contextId: number; count: number }[] }) => {
+      const sid = (payload?.sessionId || "").trim();
+      const incoming = Array.isArray(payload?.frames) ? payload!.frames! : [];
+      if (!sid) return;
+      if (incoming.length === 0) {
+        console.info("[cfg] optrace:cfg:frame_batch (empty skipped)", { sid });
+        return;
+      }
+      console.info("[cfg] optrace:cfg:frame_batch", {
+        sid,
+        entries: incoming.length,
+        keys: incoming.map((f) => makeCfgFrameKey(f.transactionId, f.contextId)),
+      });
+      setCfgSessionId((prev) => prev || sid);
+      setCfgFrames((prev) => {
+        const next = new Map(prev);
+        for (const f of incoming) {
+          const k = makeCfgFrameKey(f.transactionId, f.contextId);
+          const e = next.get(k);
+          if (e) {
+            next.set(k, { ...e, count: e.count + f.count });
+          } else {
+            next.set(k, f);
+          }
+        }
+        return next;
+      });
+    };
+
+    if (isRunningInVSCode()) {
+      // VSCode: receive events forwarded by extension host via __optrace_on_event__
+      const bridge = (window as unknown as Record<string, unknown>).__optrace_on_event__ as ((e: string, h: (d: unknown) => void) => void) | undefined;
+      bridge?.("optrace:cfg:init", (d) => handleInit(d as { sessionId?: string }));
+      bridge?.("optrace:cfg:frame_batch", (d) => handleFrameBatch(d as { sessionId?: string; frames?: { transactionId: number; contextId: number; count: number }[] }));
+
+      // Also prime from __optrace_init__ if sessionId already present (panel created with args)
+      const init = (window as unknown as Record<string, unknown>).__optrace_init__ as Record<string, unknown> | undefined;
+      const initSid = typeof init?.sessionId === 'string' ? init.sessionId.trim() : '';
+      if (initSid) {
+        console.info("[cfg/vscode] priming sessionId from __optrace_init__", { initSid });
+        setCfgSessionId(initSid);
+      }
+
+      // Pull model: tell main panel we're ready so it sends a snapshot immediately
+      invoke('cfg_request_snapshot', { sessionId: initSid || undefined }).catch(() => {});
+      return;
+    }
+
+    const w = getCurrentWindow();
+    const unlistenInitP = w.listen<{ sessionId?: string }>("optrace:cfg:init", (ev) => handleInit(ev.payload));
     // Receive aggregated frame entries (tiny payload) instead of raw 700k step objects.
     const unlistenFramesP = w.listen<{ sessionId?: string; frames?: { transactionId: number; contextId: number; count: number }[] }>(
       "optrace:cfg:frame_batch",
-      (ev) => {
-        const sid = (ev.payload?.sessionId || "").trim();
-        const incoming = Array.isArray(ev.payload?.frames) ? ev.payload!.frames! : [];
-        if (!sid) return;
-        if (incoming.length === 0) {
-          console.info("[cfg] optrace:cfg:frame_batch (empty skipped)", { sid });
-          return;
-        }
-        console.info("[cfg] optrace:cfg:frame_batch", {
-          sid,
-          entries: incoming.length,
-          keys: incoming.map((f) => makeCfgFrameKey(f.transactionId, f.contextId)),
-        });
-        setCfgSessionId((prev) => prev || sid);
-        setCfgFrames((prev) => {
-          const next = new Map(prev);
-          for (const f of incoming) {
-            const k = makeCfgFrameKey(f.transactionId, f.contextId);
-            const e = next.get(k);
-            if (e) {
-              next.set(k, { ...e, count: e.count + f.count });
-            } else {
-              next.set(k, f);
-            }
-          }
-          return next;
-        });
-      },
+      (ev) => handleFrameBatch(ev.payload),
     );
     return () => {
       unlistenInitP.then((u) => u()).catch(() => {});
@@ -663,12 +685,40 @@ function App() {
       }
       void emitCfgFrameBatch(sid, frames);
     };
-    window.once("tauri://created", () => {
-      sendSnapshot("created", true);
-      setTimeout(() => sendSnapshot("t+300ms", false), 300);
-      setTimeout(() => sendSnapshot("t+1200ms", false), 1200);
-    });
+    if (window) {
+      window.once("tauri://created", () => {
+        sendSnapshot("created", true);
+        setTimeout(() => sendSnapshot("t+300ms", false), 300);
+        setTimeout(() => sendSnapshot("t+1200ms", false), 1200);
+      });
+    } else {
+      // VSCode mode: no "window created" event — CFG panel loads async.
+      // Send snapshots after delays to ensure React has mounted and registered
+      // the __optrace_on_event__ handlers before data arrives.
+      setTimeout(() => sendSnapshot("vscode+500ms", true), 500);
+      setTimeout(() => sendSnapshot("vscode+1500ms", false), 1500);
+      setTimeout(() => sendSnapshot("vscode+4000ms", false), 4000);
+    }
   }, [sessionIdRef, allStepsRef]);
+
+  // VSCode main panel: CFG panel finished mounting and requested a snapshot re-send
+  useEffect(() => {
+    if (isCfgMode || !isRunningInVSCode()) return;
+    const bridge = (window as unknown as Record<string, unknown>).__optrace_on_event__ as ((e: string, h: (d: unknown) => void) => void) | undefined;
+    bridge?.("cfg_request_snapshot", (d) => {
+      const sid = sessionIdRef.current;
+      if (!sid) return;
+      const req = d as { sessionId?: string };
+      if (req?.sessionId && req.sessionId !== sid) return; // different session
+      const all = allStepsRef.current;
+      const frames = aggregateStepsToFrames(all.map((s, i) => ({
+        stepIndex: i, transactionId: s.transactionId ?? 0, contextId: s.contextId,
+        pc: s.pc, opcode: s.opcode, frameStepCount: s.frameStepCount, depth: s.depth,
+      })));
+      console.log("[cfg.send] cfg_request_snapshot → resend", { sid, frames: frames.length });
+      void emitCfgInit(sid).then(() => emitCfgFrameBatch(sid, frames));
+    });
+  }, [isCfgMode, sessionIdRef, allStepsRef]);
 
   if (isCfgMode) {
     const cfgFramesArr = [...cfgFrames.values()].map((f) => ({

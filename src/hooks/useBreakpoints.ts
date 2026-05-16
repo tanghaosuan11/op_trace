@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { load } from "@tauri-apps/plugin-store";
+import { loadStore } from "@/lib/ipc-bridge";
 import { useDebugStore } from "@/store/debugStore";
 import { getWindowMode } from "@/lib/windowMode";
 
@@ -17,7 +17,7 @@ export function useBreakpoints(
     breakOpcodesRef.current = opcodes;
     storeSync({ breakOpcodes: opcodes });
     if (getWindowMode().readonly) return;
-    load("config.json", { autoSave: true, defaults: {} }).then(store => {
+    loadStore("config.json").then(store => {
       store.set("breakOpcodes", Array.from(opcodes));
     });
   }, []);

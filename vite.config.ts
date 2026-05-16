@@ -9,8 +9,11 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(async () => ({
   plugins: [react()],
 
+  // 相对路径：让动态 import() 基于 import.meta.url 解析，避免 VSCode webview 下 /assets/ 返回 403
+  base: "./",
+
   worker: {
-    format: "es",
+    format: "iife",
   },
 
   resolve: {

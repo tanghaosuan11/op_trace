@@ -14,18 +14,16 @@ use revm::{
         BlockEnv, CfgEnv, Evm, LocalContext, TxEnv, result::{ExecResultAndState, ExecutionResult, HaltReason}
     }, context_interface::JournalTr, database::{AlloyDB, BlockId, CacheDB}, database_interface::WrapDatabaseAsync, handler::{EthPrecompiles, instructions::EthInstructions}, primitives::{Address, B256, Bytes, TxKind, U256, hex::FromHex}, state::EvmState
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Manager};
-use tauri::ipc::Channel;
 use serde::Serialize;
 
 use super::debug_session::{self, DebugSession};
 use super::inspector::Cheatcodes;
-use super::message_encoder::MessageEncoder;
+use super::message_encoder::{MessageEncoder, BytesSender};
 use super::types::{parse_tx_kind_from_to_field, BlockDebugData, TxDebugData};
 use super::fork::StatePatch;
-use super::cache::{resolve_cache_key, get_cache_path, dedup_cache_paths, save_cache, read_cache, merge_cache_into};
+use super::cache::{resolve_cache_key, get_cache_path_with_dir, dedup_cache_paths, save_cache, read_cache, merge_cache_into};
 use super::balance_diff::{full_addr, token_changes_from_logs, fmt_signed_delta, AddressBalanceOut, BalanceTokenChangeOut};
 use super::prestate::{fetch_prestate, apply_prestate};
 use super::spec_schedule::{parse_spec_id_name, spec_id_for_chain_block};
@@ -84,8 +82,8 @@ pub async fn op_trace(
     patches: Vec<StatePatch>,
     hand_fill: bool,
     hardfork: Option<String>,
-    channel: Channel,
-    app_handle: AppHandle,
+    sender: BytesSender,
+    data_dir: &Path,
     session_state: Arc<Mutex<std::collections::HashMap<String, super::debug_session::SessionEntry>>>,
     session_id: Option<String>,
 ) -> anyhow::Result<()> {
@@ -105,11 +103,9 @@ pub async fn op_trace(
         entry.updated_at_ms = now_ms;
     }
 
-    let shadow_temp_dir = app_handle
-        .path()
-        .temp_dir()
-        .unwrap_or_else(|_| std::env::temp_dir().join("optrace"));
-    let encoder = MessageEncoder::new(channel);
+    let shadow_temp_dir = data_dir.join("tmp");
+    let _ = std::fs::create_dir_all(&shadow_temp_dir);
+    let encoder = MessageEncoder::new(sender);
     let mut inspector =
         Cheatcodes::<BlockEnv, TxEnv, CfgEnv>::new(
             encoder,
@@ -230,7 +226,7 @@ pub async fn op_trace(
         let mut paths = Vec::with_capacity(list.len());
         for row in list.iter() {
             let (h, b) = resolve_cache_key(row, state_block_num);
-            paths.push(get_cache_path(&app_handle, &h, chain_id, b, use_prestate));
+            paths.push(get_cache_path_with_dir(data_dir, &h, chain_id, b, use_prestate));
         }
         dedup_cache_paths(paths)
     } else {
@@ -242,7 +238,7 @@ pub async fn op_trace(
         } else {
             (tx.to_string(), state_block_num)
         };
-        vec![get_cache_path(&app_handle, &h, chain_id, b, use_prestate)]
+        vec![get_cache_path_with_dir(data_dir, &h, chain_id, b, use_prestate)]
     };
 
     let mut cache_loaded_any = false;

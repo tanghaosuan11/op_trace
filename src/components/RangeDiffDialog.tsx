@@ -1,5 +1,5 @@
 import { useMemo, useEffect, useState, useRef } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "@/lib/ipc-bridge";
 import {
   Dialog,
   DialogContent,

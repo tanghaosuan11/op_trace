@@ -5,8 +5,8 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 pub mod op_trace;
 mod optrace_journal;
-mod analysis;
-mod sourcify;
+pub mod analysis;
+pub mod sourcify;
 pub mod scripts_fs;
 pub mod commands;
 

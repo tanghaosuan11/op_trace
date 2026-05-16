@@ -7,7 +7,7 @@ use serde::Serialize;
 
 pub mod evm_runner;
 mod inspector;
-pub(crate) mod message_encoder;
+pub mod message_encoder;
 mod scan;
 pub mod debug_session;
 pub mod types;

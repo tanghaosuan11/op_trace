@@ -1,6 +1,6 @@
 /** TS types for symbolic solve; mirrors Rust. Entry: `invoke("symbolic_solve", ...)`. */
 
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "@/lib/ipc-bridge";
 
 /**
  * 符号执行配置：指定哪些 calldata 字节偏移被视为符号变量

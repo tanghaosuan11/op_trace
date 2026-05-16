@@ -1,4 +1,6 @@
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { invoke, isRunningInVSCode } from "@/lib/ipc-bridge";
+import { toast } from "sonner";
 
 export type ForkInitPayload = {
   tx?: string;
@@ -20,6 +22,11 @@ export function openDebugWindow(
   sessionId = createNewSessionId(),
   opts?: { readonly?: boolean; mode?: "normal" | "whatif" | "cfg" },
 ) {
+  if (isRunningInVSCode()) {
+    toast.error("Multi-window mode is not supported in the VSCode extension.");
+    // VSCode 不支持多窗口，返回空存樹
+    return { window: null as unknown as WebviewWindow, sessionId };
+  }
   const label = `debug-${sessionId}`;
   const readonly = opts?.readonly ?? false;
   const mode = opts?.mode ?? "normal";
@@ -39,36 +46,42 @@ export function openDebugWindow(
 
 export function openForkWindow(payload: ForkInitPayload, opts?: { readonly?: boolean }) {
   const { window, sessionId } = openDebugWindow(undefined, { readonly: opts?.readonly ?? true, mode: "whatif" });
-  window.once("tauri://created", () => {
-    const init = { ...payload, sessionId };
-    console.log("[fork.window] emitting optrace:init", {
-      sessionId,
-      hasTx: !!init.tx,
-      hasTxData: !!init.txData,
-      hasBlockData: !!init.blockData,
-      txDataListLen: Array.isArray((init as { txDataList?: unknown[] }).txDataList)
-        ? (init as { txDataList?: unknown[] }).txDataList?.length
-        : undefined,
-      txSlotsLen: Array.isArray((init as { txSlots?: unknown[] }).txSlots)
-        ? (init as { txSlots?: unknown[] }).txSlots?.length
-        : undefined,
-      debugByTx: (init as { debugByTx?: boolean }).debugByTx,
-      condNodesLen: Array.isArray((init as any).condNodes) ? (init as any).condNodes.length : undefined,
-      forkPatchesLen: Array.isArray((init as any).forkPatches) ? (init as any).forkPatches.length : undefined,
+  if (window) {
+    window.once("tauri://created", () => {
+      const init = { ...payload, sessionId };
+      console.log("[fork.window] emitting optrace:init", {
+        sessionId,
+        hasTx: !!init.tx,
+        hasTxData: !!init.txData,
+        hasBlockData: !!init.blockData,
+        txDataListLen: Array.isArray((init as { txDataList?: unknown[] }).txDataList)
+          ? (init as { txDataList?: unknown[] }).txDataList?.length
+          : undefined,
+        txSlotsLen: Array.isArray((init as { txSlots?: unknown[] }).txSlots)
+          ? (init as { txSlots?: unknown[] }).txSlots?.length
+          : undefined,
+        debugByTx: (init as { debugByTx?: boolean }).debugByTx,
+        condNodesLen: Array.isArray((init as any).condNodes) ? (init as any).condNodes.length : undefined,
+        forkPatchesLen: Array.isArray((init as any).forkPatches) ? (init as any).forkPatches.length : undefined,
+      });
+      // 分次发送避免对方追不上监听器
+      const emitOnce = (tag: string) =>
+        window.emit("optrace:init", init).then(
+          () => console.log(`[fork.window] emit optrace:init ok (${tag})`),
+          (e) => console.error(`[fork.window] emit optrace:init failed (${tag})`, e),
+        );
+      setTimeout(() => emitOnce("t+250ms"), 250);
+      setTimeout(() => emitOnce("t+1250ms"), 1250);
     });
-    // Avoid race: receiver may not have installed listener yet.
-    const emitOnce = (tag: string) =>
-      window.emit("optrace:init", init).then(
-        () => console.log(`[fork.window] emit optrace:init ok (${tag})`),
-        (e) => console.error(`[fork.window] emit optrace:init failed (${tag})`, e),
-      );
-    setTimeout(() => emitOnce("t+250ms"), 250);
-    setTimeout(() => emitOnce("t+1250ms"), 1250);
-  });
+  }
   return { window, sessionId };
 }
 
 export function openCfgWindow(sessionId: string, opts?: { readonly?: boolean }) {
+  if (isRunningInVSCode()) {
+    invoke('open_cfg_window', { sessionId, readonly: opts?.readonly ?? true }).catch(() => {});
+    return { window: null as unknown as WebviewWindow, sessionId };
+  }
   // Use debug-* prefix to satisfy existing tauri plugin allowlist.
   // Append timestamp so re-opening after close always creates a fresh window
   // (same label on a closed window may silently skip tauri://created in Tauri v2).

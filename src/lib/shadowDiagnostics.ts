@@ -3,7 +3,7 @@
  * 用于在浏览器控制台调试 shadow 状态
  */
 
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "@/lib/ipc-bridge";
 
 export interface ShadowValidationMismatch {
   step: number;

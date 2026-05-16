@@ -3,7 +3,7 @@ import Editor, { type OnMount } from "@monaco-editor/react";
 import { BottomSheetShell } from "@/components/ui/bottom-sheet-shell";
 import { useDebugStore } from "@/store/debugStore";
 import { useDrawerActions } from "@/hooks/useDrawerActions";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "@/lib/ipc-bridge";
 import { Play, Square, Trash2, Copy, Loader2, Pin, PinOff, Save, Folder, FileText, PanelLeftClose, PanelLeftOpen, RefreshCw, CircleDot, ListVideo } from "lucide-react";
 import {
   PanelContextMenu,

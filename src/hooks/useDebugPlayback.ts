@@ -1,5 +1,5 @@
 import { useCallback, useRef } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "@/lib/ipc-bridge";
 import { toast } from "sonner";
 import { ipcCommands } from "../lib/ipcConfig";
 import type { StepData } from "../lib/stepPlayer";

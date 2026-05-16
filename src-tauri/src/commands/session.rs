@@ -47,7 +47,7 @@ pub fn cleanup_stale_sessions(
     before.saturating_sub(sessions.len())
 }
 
-pub(crate) fn get_session_by_sid<'a>(
+pub fn get_session_by_sid<'a>(
     sessions: &'a HashMap<String, SessionEntry>,
     sid: &str,
 ) -> Result<&'a DebugSession, String> {
@@ -63,7 +63,7 @@ pub(crate) fn get_session_by_sid<'a>(
     Err(crate::op_trace::debug_session::no_session_error(sid))
 }
 
-pub(crate) fn get_session_mut_by_sid<'a>(
+pub fn get_session_mut_by_sid<'a>(
     sessions: &'a mut HashMap<String, SessionEntry>,
     sid: &str,
 ) -> Result<&'a mut DebugSession, String> {

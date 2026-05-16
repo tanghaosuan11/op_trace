@@ -1,8 +1,7 @@
 //! Data persistence & external API proxy commands.
 
-/// 代理请求 eth-labels.com API，绕过浏览器 CORS 限制
-#[tauri::command]
-pub async fn fetch_address_labels(address: String) -> Result<Vec<serde_json::Value>, String> {
+/// 代理请求 eth-labels.com API，绕过浏览器 CORS 限制（daemon 可直接调用）
+pub async fn fetch_address_labels_impl(address: String) -> Result<Vec<serde_json::Value>, String> {
     let url = format!("https://eth-labels.com/labels/{}", address.to_lowercase());
 
     let client = reqwest::Client::builder()
@@ -18,15 +17,17 @@ pub async fn fetch_address_labels(address: String) -> Result<Vec<serde_json::Val
         .map_err(|e| format!("HTTP request failed: {}", e))?;
 
     if !response.status().is_success() {
-        return Ok(Vec::new()); // 返回空数组表示无标签
+        return Ok(Vec::new());
     }
 
-    let labels: Vec<serde_json::Value> = response
-        .json()
-        .await
-        .unwrap_or_default();
-
+    let labels: Vec<serde_json::Value> = response.json().await.unwrap_or_default();
     Ok(labels)
+}
+
+/// 代理请求 eth-labels.com API，绕过浏览器 CORS 限制
+#[tauri::command]
+pub async fn fetch_address_labels(address: String) -> Result<Vec<serde_json::Value>, String> {
+    fetch_address_labels_impl(address).await
 }
 
 // 打开应用数据目录

@@ -68,6 +68,15 @@
   }
 }
 
+/* VSCode webview 会注入默认 body margin/padding，强制重置确保全屏布局 */
+html, body, #root {
+  margin: 0 !important;
+  padding: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  overflow: hidden;
+}
+
 /* 自定义滚动条样式 */
 @layer utilities {
   /* Webkit 浏览器滚动条 */

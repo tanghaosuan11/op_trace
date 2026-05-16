@@ -12,8 +12,9 @@ use std::sync::Arc;
 
 use revm::primitives::{Address, U256};
 use revm_interpreter::InstructionResult;
-use tauri::ipc::Channel;
+use tauri::ipc::{Channel, InvokeResponseBody};
 
+use crate::op_trace::message_encoder::BytesSender;
 use crate::op_trace::{
     debug_session::{
         DebugSession, FrameRecord, FrameTerminalState, KeccakRecord, StorageChangeRecord,
@@ -32,28 +33,20 @@ use crate::op_trace::{
 
 // ─── Tauri 命令 ───────────────────────────────────────────────────────────────
 
-/// 从文件夹加载 Foundry dump 并流式发送给前端（方案A），同时写入 DebugSession（方案B）。
-///
-/// 参数：
-/// - `folder_path`：包含 `optrace_dump.json`、`optrace_calltree.json` 和 `out/` 的文件夹路径
-/// - `session_id`：可选会话 ID，默认为 `__default__`
-/// - `channel`：Tauri IPC channel
-/// - `state`：Tauri 管理的全局 DebugSessionState
-#[tauri::command]
-pub async fn start_foundry_debug(
+/// Shared replay implementation used by both the Tauri command and the daemon.
+/// The `sender` callback receives raw binary frames (same format as op_trace).
+pub async fn start_foundry_debug_impl(
     folder_path: String,
     session_id: Option<String>,
-    channel: Channel,
-    state: tauri::State<'_, DebugSessionState>,
+    sender: BytesSender,
+    session_state: Arc<std::sync::Mutex<crate::op_trace::debug_session::DebugSessionMap>>,
 ) -> Result<(), String> {
     let dump_path = format!("{}/optrace_dump.json", folder_path);
     let calltree_path = format!("{}/optrace_calltree.json", folder_path);
     let out_dir = format!("{}/out", folder_path);
 
-    // 加载 dump session
     let session = load_foundry_session(&dump_path)?;
 
-    // 加载 calltree（保留原始帧列表供 helper 发送使用）
     let calltree_frames: Vec<CallTreeFrame> = match std::fs::read_to_string(&calltree_path) {
         Ok(text) => parse_calltree(&text),
         Err(e) => {
@@ -62,15 +55,12 @@ pub async fn start_foundry_debug(
         }
     };
 
-    // 合并 dump + calltree → FrameInfo（含 value/caller）
-    // key = 0-based frame_id（内部索引），value 中的 frame_id/parent_id 已转为 1-based（wire 格式）
     let frame_info_map: HashMap<u16, FrameInfo> = if calltree_frames.is_empty() {
         HashMap::new()
     } else {
         match merge_dump_and_calltree(&session, &calltree_frames, 0) {
             Ok(fi_vec) => fi_vec.into_iter().map(|mut fi| {
-                let old_id = fi.frame_id; // 0-based，用于 lookup key
-                // 转为 1-based wire 格式（inspector 约定：frame_id 从1起，无父时 parent_id=0）
+                let old_id = fi.frame_id;
                 fi.frame_id = old_id + 1;
                 fi.parent_id = if fi.parent_id == u16::MAX { 0 } else { fi.parent_id + 1 };
                 (old_id, fi)
@@ -82,19 +72,13 @@ pub async fn start_foundry_debug(
         }
     };
 
-    // 加载字节码
     let bytecodes = load_all_bytecodes_from_out(&session, &out_dir);
-
     let sid_norm = normalize_session_id(session_id.as_deref());
-    let session_state = Arc::clone(&state.0);
-
-    // 预建 setUp wire_fid 集合（跳过 setUp 子树帧，不发给前端）
     let setup_wire_fids = build_setup_wire_fids(&session, &calltree_frames);
 
-    // 流式回放（blocking 线程，避免阻塞 Tokio 运行时）
     tokio::task::spawn_blocking(move || {
         let mut debug_sess = DebugSession::new();
-        replay_session(&session, &frame_info_map, &calltree_frames, &bytecodes, channel, 0, &mut debug_sess, &setup_wire_fids);
+        replay_session(&session, &frame_info_map, &calltree_frames, &bytecodes, sender, 0, &mut debug_sess, &setup_wire_fids);
 
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -110,6 +94,24 @@ pub async fn start_foundry_debug(
     .map_err(|e| format!("replay task panicked: {}", e))?;
 
     Ok(())
+}
+
+#[tauri::command]
+pub async fn start_foundry_debug(
+    folder_path: String,
+    session_id: Option<String>,
+    channel: Channel,
+    state: tauri::State<'_, DebugSessionState>,
+) -> Result<(), String> {
+    let sender: BytesSender = Arc::new(move |data: Vec<u8>| {
+        let _ = channel.send(InvokeResponseBody::Raw(data));
+    });
+    start_foundry_debug_impl(
+        folder_path,
+        session_id,
+        sender,
+        Arc::clone(&state.0),
+    ).await
 }
 
 // ─── 回放逻辑 ─────────────────────────────────────────────────────────────────
@@ -128,7 +130,7 @@ fn replay_session(
     frame_info_map: &HashMap<u16, FrameInfo>,
     calltree_frames: &[CallTreeFrame],
     bytecodes: &HashMap<String, Vec<u8>>,
-    channel: Channel,
+    sender: BytesSender,
     transaction_id: u32,
     debug_sess: &mut DebugSession,
     setup_wire_fids: &HashSet<u16>,
@@ -172,7 +174,7 @@ fn replay_session(
     // 每帧 emit 消费指针
     let mut emit_ptr_by_fid: HashMap<u16, usize> = HashMap::new();
 
-    let mut encoder = MessageEncoder::new(channel);
+    let mut encoder = MessageEncoder::new(sender);
     let mut frame_entered = HashSet::<u16>::new();
     let mut global_step = 0usize;
 

@@ -145,6 +145,80 @@ fn delete_dir_all_safe(p: &Path) -> Result<(), String> {
     std::fs::remove_dir(p).map_err(|e| e.to_string())
 }
 
+// ─── Daemon-compatible variants (take PathBuf instead of AppHandle) ───────────
+
+pub fn list_analysis_scripts_with_dir(scripts_root: &Path) -> Vec<AnalysisScriptTreeNode> {
+    let _ = std::fs::create_dir_all(scripts_root);
+    build_script_tree(scripts_root, scripts_root, 1, MAX_DEPTH)
+}
+
+pub fn read_analysis_script_with_dir(scripts_root: &Path, path: &str) -> Result<String, String> {
+    let rel = normalize_rel_path(path.trim())?;
+    ensure_max_depth(&rel, MAX_DEPTH)?;
+    let full = scripts_root.join(&rel);
+    if !full.extension().and_then(|s| s.to_str()).map(|s| s.eq_ignore_ascii_case("js")).unwrap_or(false) {
+        return Err("Only .js scripts are supported".into());
+    }
+    std::fs::read_to_string(&full).map_err(|e| e.to_string())
+}
+
+pub fn write_analysis_script_with_dir(scripts_root: &Path, path: &str, code: &str) -> Result<(), String> {
+    std::fs::create_dir_all(scripts_root).map_err(|e| e.to_string())?;
+    let rel = normalize_rel_path(path.trim())?;
+    ensure_max_depth(&rel, MAX_DEPTH)?;
+    let full = scripts_root.join(&rel);
+    if !full.extension().and_then(|s| s.to_str()).map(|s| s.eq_ignore_ascii_case("js")).unwrap_or(false) {
+        return Err("Only .js scripts are supported".into());
+    }
+    if let Some(parent) = full.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&full, code.as_bytes()).map_err(|e| e.to_string())
+}
+
+pub fn mkdir_analysis_script_dir_with_dir(scripts_root: &Path, path: &str) -> Result<(), String> {
+    std::fs::create_dir_all(scripts_root).map_err(|e| e.to_string())?;
+    let rel = normalize_rel_path(path.trim())?;
+    ensure_max_depth(&rel, MAX_DEPTH)?;
+    let full = scripts_root.join(&rel);
+    std::fs::create_dir_all(&full).map_err(|e| e.to_string())
+}
+
+pub fn delete_analysis_script_path_with_dir(scripts_root: &Path, path: &str) -> Result<(), String> {
+    let rel = normalize_rel_path(path.trim())?;
+    if rel.as_os_str().is_empty() {
+        return Err("Refusing to delete scripts root".into());
+    }
+    ensure_max_depth(&rel, MAX_DEPTH)?;
+    let full = scripts_root.join(&rel);
+    delete_dir_all_safe(&full)
+}
+
+pub fn rename_analysis_script_path_with_dir(scripts_root: &Path, old_path: &str, new_path: &str) -> Result<(), String> {
+    let old_rel = normalize_rel_path(old_path.trim())?;
+    if old_rel.as_os_str().is_empty() {
+        return Err("Refusing to rename scripts root".into());
+    }
+    ensure_max_depth(&old_rel, MAX_DEPTH)?;
+    let new_rel = normalize_rel_path(new_path.trim())?;
+    if new_rel.as_os_str().is_empty() {
+        return Err("Target path is empty".into());
+    }
+    ensure_max_depth(&new_rel, MAX_DEPTH)?;
+    if old_rel.parent() != new_rel.parent() {
+        return Err("Source and destination must be in the same directory".into());
+    }
+    let full_old = scripts_root.join(&old_rel);
+    let full_new = scripts_root.join(&new_rel);
+    if !full_old.exists() {
+        return Err("Source path does not exist".into());
+    }
+    if full_new.exists() {
+        return Err("A file or folder with that name already exists".into());
+    }
+    std::fs::rename(&full_old, &full_new).map_err(|e| e.to_string())
+}
+
 /// List analysis scripts under `{app_data_dir}/scripts` as a directory tree (max depth = 3).
 #[tauri::command]
 pub async fn list_analysis_scripts(app: tauri::AppHandle) -> Result<Vec<AnalysisScriptTreeNode>, String> {

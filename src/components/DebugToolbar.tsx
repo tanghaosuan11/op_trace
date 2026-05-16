@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "@/lib/ipc-bridge";
 import { Button } from "@/components/ui/button";
 import { BottomSheetShell } from "@/components/ui/bottom-sheet-shell";
 import { Input } from "@/components/ui/input";
@@ -204,7 +204,9 @@ export function DebugToolbar({
         forkPatches: inherit ? useForkStore.getState().patches : [],
       };
       const { window } = openForkWindow(payload, { readonly: true });
-      window.once("tauri://error", (e) => console.error(`[Fork Window(${inherit ? "inherit" : "blank"})] create failed:`, e));
+      if (window) {
+        window.once("tauri://error", (e) => console.error(`[Fork Window(${inherit ? "inherit" : "blank"})] create failed:`, e));
+      }
     } catch (e) {
       console.error(`[Fork Window(${inherit ? "inherit" : "blank"})] create threw:`, e);
     }

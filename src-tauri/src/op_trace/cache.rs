@@ -58,7 +58,17 @@ pub(crate) fn get_cache_path(
         .path()
         .app_data_dir()
         .unwrap_or_else(|_| std::env::temp_dir().join("optrace"));
-    let dir = cache_dir.join("cache").join("evm_cache").join(chain_id.to_string());
+    get_cache_path_with_dir(&cache_dir, name_tx_part, chain_id, block_num, prestate)
+}
+
+pub(crate) fn get_cache_path_with_dir(
+    data_dir: &Path,
+    name_tx_part: &str,
+    chain_id: u64,
+    block_num: u64,
+    prestate: bool,
+) -> PathBuf {
+    let dir = data_dir.join("cache").join("evm_cache").join(chain_id.to_string());
     std::fs::create_dir_all(&dir).ok();
     let suffix = if prestate { "_pre" } else { "" };
     let clean_hash = name_tx_part

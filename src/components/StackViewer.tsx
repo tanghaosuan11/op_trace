@@ -1,5 +1,5 @@
 import { useRef } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "@/lib/ipc-bridge";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Crosshair } from "lucide-react";

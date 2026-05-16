@@ -2,7 +2,7 @@ import "@/lib/monacoSetup";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import * as monacoNS from "monaco-editor";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "@/lib/ipc-bridge";
 import { Loader2, FileCode, Undo2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";

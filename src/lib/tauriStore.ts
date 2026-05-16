@@ -9,13 +9,41 @@ import { getWindowMode } from "./windowMode";
 let _store: Store | null = null;
 let _loading: Promise<Store> | null = null;
 
-/** 获取单例 Store 实例 */
+/** 获取单例 Store 实例（非 Tauri 环境自动 fallback 到 localStorage） */
 export async function getStore(): Promise<Store> {
   if (_store) return _store;
   if (!_loading) {
     _loading = load("settings.json", { autoSave: true, defaults: {} }).then((s) => {
       _store = s;
       return s;
+    }).catch(() => {
+      // 非 Tauri 环境（VSCode webview 等）：用 localStorage 作为 fallback
+      const mock: Store = {
+        async get<T>(key: string): Promise<T | null | undefined> {
+          const v = localStorage.getItem('optrace:store:' + key);
+          return v != null ? (JSON.parse(v) as T) : undefined;
+        },
+        async set(key: string, value: unknown): Promise<void> {
+          localStorage.setItem('optrace:store:' + key, JSON.stringify(value));
+        },
+        async delete(key: string): Promise<void> {
+          localStorage.removeItem('optrace:store:' + key);
+        },
+        async clear(): Promise<void> {},
+        async reset(): Promise<void> {},
+        async has(key: string): Promise<boolean> { return localStorage.getItem('optrace:store:' + key) != null; },
+        async keys(): Promise<string[]> { return []; },
+        async values(): Promise<unknown[]> { return []; },
+        async entries(): Promise<[string, unknown][]> { return []; },
+        async length(): Promise<number> { return 0; },
+        async reload(): Promise<void> {},
+        async save(): Promise<void> {},
+        async close(): Promise<void> {},
+        onKeyChange<T>(_key: string, _cb: (v: T | null) => void) { return Promise.resolve(() => {}); },
+        onChange(_cb: (key: string, v: unknown) => void) { return Promise.resolve(() => {}); },
+      } as unknown as Store;
+      _store = mock;
+      return mock;
     });
   }
   return _loading;

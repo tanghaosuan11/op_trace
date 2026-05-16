@@ -1,4 +1,4 @@
-import { invoke, Channel } from "@tauri-apps/api/core";
+import { invoke, Channel, isRunningInVSCode } from "@/lib/ipc-bridge";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { createPublicClient, http } from "viem";
 import { useDebugStore } from "@/store/debugStore";
@@ -432,7 +432,7 @@ export async function startDebugAction(deps: StartDebugDeps) {
     const finalCount = deps.allStepsRef.current.length;
     if (finalCount > 0) deps.setStepCount(finalCount);
   } catch (error) {
-    console.log("准备调试数据:", { txHash, txData, blockData });
+    console.log("调试失败:", { txHash, error: error instanceof Error ? error.message : String(error) });
     console.error("调试失败:", error);
     const msg = error instanceof Error ? error.message : String(error);
     toast.error(msg || "Debug failed");
@@ -547,8 +547,13 @@ export interface StartFoundryDebugDeps extends MessageHandlerContext {
  * 依赖：文件夹中必须有 optrace_dump.json, optrace_calltree.json, out/
  */
 export async function startFoundryDebugAction(deps: StartFoundryDebugDeps) {
-  const selected = await openDialog({ directory: true, multiple: false, title: "选择 Foundry 项目文件夹" });
-  if (!selected || typeof selected !== "string") return;
+  let selected: string | null = null;
+  if (isRunningInVSCode()) {
+    selected = await invoke<string | null>('open_folder_dialog', { title: '选择 Foundry 项目文件夹' });
+  } else {
+    selected = await openDialog({ directory: true, multiple: false, title: '选择 Foundry 项目文件夹' }) as string | null;
+  }
+  if (!selected || typeof selected !== 'string') return;
 
   const folderPath = selected;
 

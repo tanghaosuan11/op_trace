@@ -5160,6 +5160,7 @@ dependencies = [
  "alloy-rpc-types-eth",
  "alloy-sol-types",
  "anyhow",
+ "base64 0.22.1",
  "bincode",
  "heimdall-decompiler",
  "hex",

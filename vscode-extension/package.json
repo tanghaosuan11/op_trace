@@ -1,0 +1,55 @@
+{
+  "name": "optrace",
+  "displayName": "OpTrace — EVM Debugger",
+  "description": "Step-through EVM execution tracer and debugger for Solidity developers",
+  "version": "0.1.0",
+  "publisher": "TangHaoSuan",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Debuggers", "Other"],
+  "keywords": ["ethereum", "evm", "solidity", "debugger", "trace"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TangHaoSuan/OpTrace"
+  },
+  "activationEvents": [
+    "onCommand:optrace.open"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "optrace.open",
+        "title": "OpTrace: Open EVM Debugger",
+        "icon": "$(debug-alt)"
+      },
+      {
+        "command": "optrace.openCfg",
+        "title": "OpTrace: Open CFG Window"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "optrace.open",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "pnpm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "pnpm run compile",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^18.0.0",
+    "typescript": "^5.0.0",
+    "@vscode/vsce": "^2.0.0"
+  },
+  "dependencies": {}
+}

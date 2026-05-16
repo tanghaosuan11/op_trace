@@ -34,13 +34,26 @@ export const BUILTIN_SCRIPTS: ScriptEntry[] = [
 let _store: Store | null = null;
 let _loading: Promise<Store> | null = null;
 
+function makeLocalStorageMock(prefix: string): Store {
+  const k = (key: string) => `optrace:${prefix}:${key}`;
+  return {
+    async get<T>(key: string): Promise<T | null | undefined> { const v = localStorage.getItem(k(key)); return v != null ? JSON.parse(v) as T : undefined; },
+    async set(key: string, value: unknown) { localStorage.setItem(k(key), JSON.stringify(value)); },
+    async delete(key: string) { localStorage.removeItem(k(key)); },
+    async clear() {}, async reset() {}, async has(key: string) { return localStorage.getItem(k(key)) != null; },
+    async keys() { return []; }, async values() { return []; }, async entries() { return []; }, async length() { return 0; },
+    async reload() {}, async save() {}, async close() {},
+    onKeyChange: () => Promise.resolve(() => {}), onChange: () => Promise.resolve(() => {}),
+  } as unknown as Store;
+}
+
 async function getScriptsStore(): Promise<Store> {
   if (_store) return _store;
   if (!_loading) {
     _loading = load("scripts.json", { autoSave: true, defaults: {} }).then((s) => {
       _store = s;
       return s;
-    });
+    }).catch(() => { _store = makeLocalStorageMock('scripts'); return _store!; });
   }
   return _loading;
 }

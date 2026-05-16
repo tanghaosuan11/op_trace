@@ -107,6 +107,45 @@ pub fn decompile_write_cache(
     Ok(())
 }
 
+// ─── Daemon-compatible variants (take &Path instead of AppHandle) ─────────────
+
+fn contract_cache_path_with_dir(data_dir: &std::path::Path, chain_id: u64, address: &str) -> Result<std::path::PathBuf, String> {
+    let addr = normalize_address(address)?;
+    let dir = data_dir.join("contract").join(chain_id.to_string());
+    Ok(dir.join(format!("{}.json", addr)))
+}
+
+pub fn sourcify_read_cache_with_dir(data_dir: &std::path::Path, chain_id: u64, address: &str) -> Result<Option<String>, String> {
+    let path = contract_cache_path_with_dir(data_dir, chain_id, address)?;
+    if !path.is_file() { return Ok(None); }
+    std::fs::read_to_string(&path).map(Some).map_err(|e| e.to_string())
+}
+
+pub fn sourcify_write_cache_with_dir(data_dir: &std::path::Path, chain_id: u64, address: &str, json: &str) -> Result<(), String> {
+    let _: serde_json::Value = serde_json::from_str(json).map_err(|e| format!("Invalid JSON: {e}"))?;
+    let path = contract_cache_path_with_dir(data_dir, chain_id, address)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, json.as_bytes()).map_err(|e| e.to_string())
+}
+
+pub fn decompile_read_cache_impl(chain_id: u64, address: &str) -> Result<Option<String>, String> {
+    let normalized_addr = normalize_address(address)?;
+    let cache_key = format!("{}:{}", chain_id, normalized_addr);
+    let cache = DECOMPILE_CACHE.lock().map_err(|e| format!("Failed to lock cache: {e}"))?;
+    Ok(cache.get(&cache_key).cloned())
+}
+
+pub fn decompile_write_cache_impl(chain_id: u64, address: &str, json: &str) -> Result<(), String> {
+    let _: serde_json::Value = serde_json::from_str(json).map_err(|e| format!("Invalid JSON: {e}"))?;
+    let normalized_addr = normalize_address(address)?;
+    let cache_key = format!("{}:{}", chain_id, normalized_addr);
+    let mut cache = DECOMPILE_CACHE.lock().map_err(|e| format!("Failed to lock cache: {e}"))?;
+    cache.insert(cache_key, json.to_owned());
+    Ok(())
+}
+
 /// 调用 heimdall-decompiler 反编译字节码
 #[tauri::command]
 pub async fn decompile_bytecode(

@@ -1,5 +1,6 @@
 import { emit, listen } from "@tauri-apps/api/event";
 import { getAllWebviewWindows } from "@tauri-apps/api/webviewWindow";
+import { invoke, isRunningInVSCode } from "@/lib/ipc-bridge";
 
 /** Cross-window sync (main ↔ CFG and future tools). Use `emit` so any webview can subscribe. */
 export const EVT_CROSS_PLAYBACK = "optrace:cross:playback";
@@ -40,26 +41,32 @@ export function globalStepToSeqStep(indices: number[] | undefined, globalStep: n
 }
 
 export async function emitCrossPlaybackState(payload: CrossPlaybackPayload) {
+  if (isRunningInVSCode()) return;
   await emit(EVT_CROSS_PLAYBACK, payload);
 }
 
 export async function emitCrossMainStepSync(payload: CrossMainStepPayload) {
+  if (isRunningInVSCode()) return;
   await emit(EVT_CROSS_MAIN_STEP, payload);
 }
 
 export async function emitCrossCfgSeqCommit(payload: CrossCfgSeqCommitPayload) {
+  if (isRunningInVSCode()) return;
   await emit(EVT_CROSS_CFG_SEQ_COMMIT, payload);
 }
 
 export function listenCrossPlayback(handler: (payload: CrossPlaybackPayload) => void) {
+  if (isRunningInVSCode()) return Promise.resolve(() => {});
   return listen<CrossPlaybackPayload>(EVT_CROSS_PLAYBACK, (e) => handler(e.payload));
 }
 
 export function listenCrossMainStep(handler: (payload: CrossMainStepPayload) => void) {
+  if (isRunningInVSCode()) return Promise.resolve(() => {});
   return listen<CrossMainStepPayload>(EVT_CROSS_MAIN_STEP, (e) => handler(e.payload));
 }
 
 export function listenCrossCfgSeqCommit(handler: (payload: CrossCfgSeqCommitPayload) => void) {
+  if (isRunningInVSCode()) return Promise.resolve(() => {});
   return listen<CrossCfgSeqCommitPayload>(EVT_CROSS_CFG_SEQ_COMMIT, (e) => handler(e.payload));
 }
 
@@ -110,6 +117,10 @@ function isCfgWindow(label: string): boolean {
 }
 
 export async function emitCfgInit(sessionId: string) {
+  if (isRunningInVSCode()) {
+    invoke('cfg_broadcast', { event: 'optrace:cfg:init', data: { sessionId } }).catch(() => {});
+    return;
+  }
   const windows = await getAllWebviewWindows();
   await Promise.all(
     windows
@@ -124,6 +135,10 @@ export async function emitCfgInit(sessionId: string) {
  */
 export async function emitCfgFrameBatch(sessionId: string, frames: CfgFrameEntry[]) {
   if (frames.length === 0) return;
+  if (isRunningInVSCode()) {
+    invoke('cfg_broadcast', { event: 'optrace:cfg:frame_batch', data: { sessionId, frames } }).catch(() => {});
+    return;
+  }
   const windows = await getAllWebviewWindows();
   await Promise.all(
     windows
@@ -150,6 +165,10 @@ export interface CfgCurrentStepPayload {
 }
 
 export async function emitCfgCurrentStep(payload: CfgCurrentStepPayload) {
+  if (isRunningInVSCode()) {
+    invoke('cfg_broadcast', { event: 'optrace:cfg:current_step', data: payload }).catch(() => {});
+    return;
+  }
   const windows = await getAllWebviewWindows();
   await Promise.all(
     windows

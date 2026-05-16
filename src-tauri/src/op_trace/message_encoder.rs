@@ -4,8 +4,10 @@ use revm::primitives::{Address, Log, StorageKey, StorageValue, U256};
 use revm_interpreter::InstructionResult;
 use serde::Serialize;
 use std::sync::Arc;
-use tauri::ipc::{Channel, InvokeResponseBody};
 use crate::op_trace::debug_session::{StateChangeKind, StateChangeRecord};
+
+/// 底层字节发送器，由调用方注入（Tauri: channel.send; daemon: stdout JSON）
+pub type BytesSender = Arc<dyn Fn(Vec<u8>) + Send + Sync + 'static>;
 
 
 #[repr(u8)]
@@ -45,7 +47,7 @@ const NEEDS_STACK: [u8; 13] = [
 ];
 
 pub(crate) struct MessageEncoder {
-    channel: Arc<Channel>,
+    sender: BytesSender,
     /// 正在累积的 StepBatch 缓冲（第 0 字节已写 MsgType::StepBatch）
     step_payload: Vec<u8>,
     /// 当前缓冲中的步数
@@ -57,7 +59,7 @@ pub(crate) struct MessageEncoder {
 impl Clone for MessageEncoder {
     fn clone(&self) -> Self {
         Self {
-            channel: Arc::clone(&self.channel),
+            sender: Arc::clone(&self.sender),
             step_payload: self.step_payload.clone(),
             step_cache_count: self.step_cache_count,
             last_step_gas_cost_offset: self.last_step_gas_cost_offset,
@@ -66,11 +68,11 @@ impl Clone for MessageEncoder {
 }
 
 impl MessageEncoder {
-    pub fn new(channel: Channel) -> Self {
+    pub fn new(sender: BytesSender) -> Self {
         let mut payload = Vec::with_capacity(1 + STEP_BATCH_SIZE * 400);
         payload.push(MsgType::StepBatch as u8);
         Self {
-            channel: Arc::new(channel),
+            sender,
             step_payload: payload,
             step_cache_count: 0,
             last_step_gas_cost_offset: None,
@@ -152,7 +154,7 @@ impl MessageEncoder {
         next.push(MsgType::StepBatch as u8);
         let packet = std::mem::replace(&mut self.step_payload, next);
         self.step_cache_count = 0;
-        let _ = self.channel.send(InvokeResponseBody::Raw(packet));
+        (self.sender)(packet);
     }
 
 
@@ -162,7 +164,7 @@ impl MessageEncoder {
         let mut packet = Vec::with_capacity(1 + json.len());
         packet.push(MsgType::FrameEnter as u8);
         packet.extend_from_slice(&json);
-        let _ = self.channel.send(InvokeResponseBody::Raw(packet));
+        (self.sender)(packet);
     }
 
     /// 发送 FrameExit
@@ -185,7 +187,7 @@ impl MessageEncoder {
         packet.extend_from_slice(&gas_used.to_be_bytes());
         packet.extend_from_slice(&(output.len() as u32).to_be_bytes());
         packet.extend_from_slice(output);
-        let _ = self.channel.send(InvokeResponseBody::Raw(packet));
+        (self.sender)(packet);
     }
 
     /// 发送 SelfDestruct 事件
@@ -205,7 +207,7 @@ impl MessageEncoder {
         packet.extend_from_slice(contract.as_slice());
         packet.extend_from_slice(target.as_slice());
         packet.extend_from_slice(&value.to_be_bytes::<32>());
-        let _ = self.channel.send(InvokeResponseBody::Raw(packet));
+        (self.sender)(packet);
     }
 
     /// 发送余额变化汇总 JSON
@@ -213,7 +215,7 @@ impl MessageEncoder {
         let mut packet = Vec::with_capacity(1 + json.len());
         packet.push(MsgType::BalanceChanges as u8);
         packet.extend_from_slice(json.as_bytes());
-        let _ = self.channel.send(InvokeResponseBody::Raw(packet));
+        (self.sender)(packet);
     }
 
     /// 发送 Finished 信号。
@@ -234,12 +236,10 @@ impl MessageEncoder {
                 let mut packet = Vec::with_capacity(1 + json.len());
                 packet.push(MsgType::Finished as u8);
                 packet.extend_from_slice(&json);
-                let _ = self.channel.send(InvokeResponseBody::Raw(packet));
+                (self.sender)(packet);
             }
             _ => {
-                let _ = self
-                    .channel
-                    .send(InvokeResponseBody::Raw(vec![MsgType::Finished as u8]));
+                (self.sender)(vec![MsgType::Finished as u8]);
             }
         }
     }
@@ -263,7 +263,7 @@ impl MessageEncoder {
         packet.extend_from_slice(&context_id.to_be_bytes());
         packet.extend_from_slice(&(bytecode.len() as u32).to_be_bytes());
         packet.extend_from_slice(bytecode);
-        let _ = self.channel.send(InvokeResponseBody::Raw(packet));
+        (self.sender)(packet);
     }
 
     /// 发送 ContextUpdateAddress（CREATE 后回填部署地址）
@@ -279,7 +279,7 @@ impl MessageEncoder {
         packet.extend_from_slice(&transaction_id.to_be_bytes());
         packet.extend_from_slice(&context_id.to_be_bytes());
         packet.extend_from_slice(address.as_slice());
-        let _ = self.channel.send(InvokeResponseBody::Raw(packet));
+        (self.sender)(packet);
     }
 
     /// 发送 ReturnData（RETURN / REVERT 输出）
@@ -297,7 +297,7 @@ impl MessageEncoder {
         packet.extend_from_slice(&context_id.to_be_bytes());
         packet.extend_from_slice(&step_count.to_be_bytes());
         packet.extend_from_slice(data);
-        let _ = self.channel.send(InvokeResponseBody::Raw(packet));
+        (self.sender)(packet);
     }
 
     /// 发送 StorageChange
@@ -325,7 +325,7 @@ impl MessageEncoder {
         packet.extend_from_slice(&key.to_be_bytes::<32>());
         packet.extend_from_slice(&old_value.to_be_bytes::<32>());
         packet.extend_from_slice(&new_value.to_be_bytes::<32>());
-        let _ = self.channel.send(InvokeResponseBody::Raw(packet));
+        (self.sender)(packet);
     }
 
     /// 发送 KeccakOp
@@ -346,7 +346,7 @@ impl MessageEncoder {
         packet.extend_from_slice(hash);
         packet.extend_from_slice(&(input.len() as u32).to_be_bytes());
         packet.extend_from_slice(input);
-        let _ = self.channel.send(InvokeResponseBody::Raw(packet));
+        (self.sender)(packet);
     }
 
     /// 发送 Logs（JSON 序列化的 Log）
@@ -365,7 +365,7 @@ impl MessageEncoder {
         packet.extend_from_slice(&step_index.to_be_bytes());
         packet.extend_from_slice(&transaction_id.to_be_bytes());
         packet.extend_from_slice(json.as_bytes());
-        let _ = self.channel.send(InvokeResponseBody::Raw(packet));
+        (self.sender)(packet);
     }
 
     /// 发送预构建好的 Log JSON（用于 Foundry 模式，topics 来自 EVM 栈，data 为 emit 文本）
@@ -383,7 +383,7 @@ impl MessageEncoder {
         packet.extend_from_slice(&step_index.to_be_bytes());
         packet.extend_from_slice(&transaction_id.to_be_bytes());
         packet.extend_from_slice(log_json.as_bytes());
-        let _ = self.channel.send(InvokeResponseBody::Raw(packet));
+        (self.sender)(packet);
     }
 
     /// 发送 FoundrySourceJson（Foundry 模式源码+sourcemap JSON，仅内存，不持久化）
@@ -400,7 +400,7 @@ impl MessageEncoder {
         packet.extend_from_slice(&context_id.to_be_bytes());
         packet.extend_from_slice(&(json_bytes.len() as u32).to_be_bytes());
         packet.extend_from_slice(json_bytes);
-        let _ = self.channel.send(InvokeResponseBody::Raw(packet));
+        (self.sender)(packet);
     }
 
     /// 发送 StateChange（账户/余额/nonce 变化）
@@ -463,6 +463,6 @@ impl MessageEncoder {
         packet.extend_from_slice(&rec.frame_id.to_be_bytes());
         packet.extend_from_slice(&rec.step_index.to_be_bytes());
         packet.extend_from_slice(json.as_bytes());
-        let _ = self.channel.send(InvokeResponseBody::Raw(packet));
+        (self.sender)(packet);
     }
 }

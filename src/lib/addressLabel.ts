@@ -1,7 +1,7 @@
 // 地址标签系统 — 获取并缓存链上地址的标签信息。
 
 import { load, type Store } from "@tauri-apps/plugin-store";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "@/lib/ipc-bridge";
 
 
 /** 单个地址标签 */
@@ -26,13 +26,26 @@ export interface CachedAddressLabels {
 let _store: Store | null = null;
 let _loading: Promise<Store> | null = null;
 
+function makeLocalStorageMock(prefix: string): Store {
+  const k = (key: string) => `optrace:${prefix}:${key}`;
+  return {
+    async get<T>(key: string): Promise<T | null | undefined> { const v = localStorage.getItem(k(key)); return v != null ? JSON.parse(v) as T : undefined; },
+    async set(key: string, value: unknown) { localStorage.setItem(k(key), JSON.stringify(value)); },
+    async delete(key: string) { localStorage.removeItem(k(key)); },
+    async clear() {}, async reset() {}, async has(key: string) { return localStorage.getItem(k(key)) != null; },
+    async keys() { return []; }, async values() { return []; }, async entries() { return []; }, async length() { return 0; },
+    async reload() {}, async save() {}, async close() {},
+    onKeyChange: () => Promise.resolve(() => {}), onChange: () => Promise.resolve(() => {}),
+  } as unknown as Store;
+}
+
 async function getAddressLabelsStore(): Promise<Store> {
   if (_store) return _store;
   if (!_loading) {
     _loading = load("address_labels.json", { autoSave: true, defaults: {} }).then((s) => {
       _store = s;
       return s;
-    });
+    }).catch(() => { _store = makeLocalStorageMock('addr'); return _store!; });
   }
   return _loading;
 }

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import CfgLayoutSvgWorkerInline from "../lib/cfgLayoutWorker.ts?worker&inline";
+import { invoke, isRunningInVSCode } from "@/lib/ipc-bridge";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Lock, Unlock } from "lucide-react";
 import type { CfgCurrentStepPayload } from "@/lib/cfgBridge";
@@ -80,7 +81,7 @@ const _pending = new Map<string, { resolve: (svg: string) => void; reject: (e: E
 
 function getLayoutWorker(): Worker {
   if (!_worker) {
-    _worker = new Worker(new URL("../lib/cfgLayoutWorker.ts", import.meta.url), { type: "module" });
+    _worker = new CfgLayoutSvgWorkerInline();
     _worker.onmessage = (e: MessageEvent<{ id: string; svg?: string; error?: string }>) => {
       const { id, svg, error } = e.data;
       const cb = _pending.get(id);
@@ -282,24 +283,19 @@ export function CfgWindow({ sessionId, frames }: CfgWindowProps) {
   }, [fetchCfg]);
 
   useEffect(() => {
-    const w = getCurrentWindow();
-    const unlistenP = w.listen<CfgCurrentStepPayload>("optrace:cfg:current_step", (ev) => {
-      const p = ev.payload;
+    const handleStep = (p: CfgCurrentStepPayload) => {
       if (!p?.sessionId || p.sessionId !== sessionId) return;
-      if (p.pc === undefined) {
-        setPlayCursor(null);
-        return;
-      }
-      setPlayCursor({
-        transactionId: p.transactionId,
-        contextId: p.contextId,
-        pc: p.pc,
-        prevPc: p.prevPc,
-      });
-    });
-    return () => {
-      unlistenP.then((u) => u()).catch(() => {});
+      if (p.pc === undefined) { setPlayCursor(null); return; }
+      setPlayCursor({ transactionId: p.transactionId, contextId: p.contextId, pc: p.pc, prevPc: p.prevPc });
     };
+    if (isRunningInVSCode()) {
+      const bridge = (window as unknown as Record<string, unknown>).__optrace_on_event__ as ((e: string, h: (d: unknown) => void) => void) | undefined;
+      bridge?.("optrace:cfg:current_step", (d) => handleStep(d as CfgCurrentStepPayload));
+      return;
+    }
+    const w = getCurrentWindow();
+    const unlistenP = w.listen<CfgCurrentStepPayload>("optrace:cfg:current_step", (ev) => handleStep(ev.payload));
+    return () => { unlistenP.then((u) => u()).catch(() => {}); };
   }, [sessionId]);
 
   const blocks = cfgData?.blocks ?? [];

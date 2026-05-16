@@ -26,3 +26,10 @@ doc/
 .env.local
 .cursorrules
 *.py
+# VSCode Extension build outputs
+vscode-extension/node_modules/
+vscode-extension/out/
+vscode-extension/*.vsix
+vscode-extension/webview-dist/
+vscode-extension/bin/
+vscode-extension/pnpm-lock.yaml

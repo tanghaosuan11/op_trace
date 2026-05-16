@@ -1,7 +1,8 @@
 //! Debug-core tauri commands: op_trace, seek_to, range_full_data, etc.
 
 use std::sync::Arc;
-use tauri::ipc::Channel;
+use tauri::ipc::{Channel, InvokeResponseBody};
+use tauri::Manager;
 
 use crate::op_trace;
 use super::session::*;
@@ -71,8 +72,8 @@ pub async fn op_trace(
         patches.unwrap_or_default(),
         hand_fill.unwrap_or(false),
         hardfork,
-        channel,
-        app_handle,
+        Arc::new(move |data| { let _ = channel.send(InvokeResponseBody::Raw(data)); }),
+        &app_handle.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir().join("optrace")),
         session_arc,
         Some(sid.clone()),
     )

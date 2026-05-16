@@ -1,5 +1,6 @@
 import type { ParsedStepBatchResult, StepData, StepStackEntry } from "./stepPlayer";
 import { unpackCompactToSteps, unpackCompactStep } from "./stepPlayer";
+import StepBatchWorkerInline from "./stepBatchWorker.ts?worker&inline";
 import { frameScopeKey, frameScopeKeyFromFrame, frameScopeKeyFromStep } from "./frameScope";
 import { disassemble, type Opcode } from "./opcodes";
 import { useDebugStore } from "@/store/debugStore";
@@ -193,10 +194,16 @@ function finalizeFinished(context: MessageHandlerContext) {
         executedOpcodeSet,
     });
     // 强制同步最终状态到 React（VM helper 帧仅用于 calltree，不进入 frame list）
-    context.setCallFrames(context.callFramesRef.current.filter(f => !f.isVmHelper));
+    const visibleFrames = context.callFramesRef.current.filter(f => !f.isVmHelper);
+    context.setCallFrames(visibleFrames);
     const totalSteps = context.allStepsRef.current.length;
     context.setStepCount(totalSteps);
     context.setIsDebugging(false);
+    // 如果 activeTab 仍在 "main"（e.g. VSCode 模式下 seek_to 异步未完成），切换到第一帧
+    if (useDebugStore.getState().activeTab === "main" && visibleFrames.length > 0) {
+        context.setActiveTab(visibleFrames[0]!.id);
+        context.applyStep(0);
+    }
     if (context.runtime.debugStartPerfMs !== null && !context.runtime.finishedPerfLogged) {
         const elapsedMs = performance.now() - context.runtime.debugStartPerfMs;
         console.log(
@@ -285,7 +292,7 @@ function drainParsedStepBatches(context: MessageHandlerContext) {
 function ensureStepBatchWorker(context: MessageHandlerContext): Worker {
     if (context.runtime.stepBatchWorker) return context.runtime.stepBatchWorker;
 
-    const worker = new Worker(new URL("./stepBatchWorker.ts", import.meta.url), { type: "module" });
+    const worker = new StepBatchWorkerInline();
     worker.onmessage = (event: MessageEvent<{
         kind: "parsed"; seq: number;
         compact: Float64Array; stackEntries: StepStackEntry[];

@@ -1,5 +1,6 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import CfgLayoutWorkerInline from "../lib/cfgLayoutWorkerPlain.ts?worker&inline";
+import { invoke, isRunningInVSCode } from "@/lib/ipc-bridge";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Fuel, Home, Lock, SlidersHorizontal, Unlock } from "lucide-react";import {
   Application,
@@ -270,7 +271,7 @@ const _pending = new Map<string, { resolve: (plain: string) => void; reject: (e:
 
 function getLayoutWorker(): Worker {
   if (!_worker) {
-    _worker = new Worker(new URL("../lib/cfgLayoutWorkerPlain.ts", import.meta.url), { type: "module" });
+    _worker = new CfgLayoutWorkerInline();
     _worker.onmessage = (e: MessageEvent<{ id: string; plain?: string; error?: string }>) => {
       const { id, plain, error } = e.data;
       const cb = _pending.get(id);
@@ -1169,35 +1170,22 @@ export const CfgWindow = forwardRef<CfgWindowHandle, CfgWindowProps>(function Cf
   }, [parsedGraph, cfgData, appReady, applyTransform, fitToView, centerGraphInView]);
 
   useEffect(() => {
-    const w = getCurrentWindow();
-    const unlistenP = w.listen<CfgCurrentStepPayload>("optrace:cfg:current_step", (ev) => {
-      const p = ev.payload;
+    const handleStep = (p: CfgCurrentStepPayload) => {
       cfgSyncLog("current_step 收到", { payload: p, cfgSessionId: sessionId || "(empty)" });
-      if (!p?.sessionId) {
-        cfgSyncLog("current_step 丢弃: payload 无 sessionId");
-        return;
-      }
-      if (sessionId && p.sessionId !== sessionId) {
-        cfgSyncLog("current_step 丢弃: session 不一致", { payloadSid: p.sessionId, cfgSid: sessionId });
-        return;
-      }
-      if (!sessionId) {
-        cfgSyncLog("current_step 警告: CFG 尚未收到 init，sessionId 为空，仍尝试应用");
-      }
-      if (p.pc === undefined) {
-        cfgSyncLog("current_step: 清除 playCursor（无 pc）");
-        setPlayCursor(null);
-        return;
-      }
+      if (!p?.sessionId) { cfgSyncLog("current_step 丢弃: payload 无 sessionId"); return; }
+      if (sessionId && p.sessionId !== sessionId) { cfgSyncLog("current_step 丢弃: session 不一致", { payloadSid: p.sessionId, cfgSid: sessionId }); return; }
+      if (!sessionId) cfgSyncLog("current_step 警告: CFG 尚未收到 init，sessionId 为空，仍尝试应用");
+      if (p.pc === undefined) { cfgSyncLog("current_step: 清除 playCursor（无 pc）"); setPlayCursor(null); return; }
       cfgSyncLog("current_step → playCursor", { tx: p.transactionId, ctx: p.contextId, pc: p.pc, stepIndex: p.stepIndex });
-      setPlayCursor({
-        transactionId: p.transactionId,
-        contextId: p.contextId,
-        pc: p.pc,
-        prevPc: p.prevPc,
-        stepIndex: p.stepIndex,
-      });
-    });
+      setPlayCursor({ transactionId: p.transactionId, contextId: p.contextId, pc: p.pc, prevPc: p.prevPc, stepIndex: p.stepIndex });
+    };
+    if (isRunningInVSCode()) {
+      const bridge = (window as unknown as Record<string, unknown>).__optrace_on_event__ as ((e: string, h: (d: unknown) => void) => void) | undefined;
+      bridge?.("optrace:cfg:current_step", (d) => handleStep(d as CfgCurrentStepPayload));
+      return;
+    }
+    const w = getCurrentWindow();
+    const unlistenP = w.listen<CfgCurrentStepPayload>("optrace:cfg:current_step", (ev) => handleStep(ev.payload));
     return () => { unlistenP.then((u) => u()).catch(() => {}); };
   }, [sessionId]);
 
