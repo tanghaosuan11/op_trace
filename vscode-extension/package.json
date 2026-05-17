@@ -2,7 +2,7 @@
   "name": "optrace",
   "displayName": "OpTrace — EVM Debugger",
   "description": "Step-through EVM execution tracer and debugger for Solidity developers",
-  "version": "0.1.0",
+  "version": "0.1.12",
   "publisher": "TangHaoSuan",
   "engines": {
     "vscode": "^1.85.0"

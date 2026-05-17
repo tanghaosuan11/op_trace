@@ -1,9 +1,10 @@
 [package]
 name = "optrace"
-version = "0.1.10"
+version = "0.1.12"
 description = "A Tauri-based EVM execution tracer and debugger"
 authors = ["TangHaoSuan"]
 edition = "2021"
+default-run = "optrace"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
